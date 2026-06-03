@@ -1,10 +1,10 @@
 {
   "name": "@omadia/channel-slack",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "main": "dist/plugin.js",
-  "description": "Slack channel for Omadia — Slack Socket Mode (no public webhook) with bot-token + app-token auth. Routes Slack DMs and @mentions into the Omadia orchestrator.",
+  "description": "Slack channel for Omadia — Events API webhook (production) or Socket Mode (zero-infra fallback). Routes Slack DMs and @mentions into the Omadia orchestrator.",
   "license": "MIT",
   "homepage": "https://github.com/byte5ai/omadia-channel-slack",
   "repository": {

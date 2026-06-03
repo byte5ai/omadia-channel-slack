@@ -1,15 +1,19 @@
 schema_version: "1"
 
 # ===========================================================================
-# @omadia/channel-slack — Slack channel (Slack Socket Mode)
+# @omadia/channel-slack — Slack channel (Events API webhook | Socket Mode)
 # ---------------------------------------------------------------------------
 # Schema of truth: docs/harness-platform/manifest-schema.v1.yaml (section 14).
 # A channel ROUTES turns — it has NO capabilities / playbook of its own. It
-# receives native Slack events over a Socket Mode WebSocket, translates them
-# to the core IncomingTurn shape, drives the orchestrator's ChatAgent, and
-# renders the answer back to Slack. Auth is a Slack app's bot-token + an
-# app-level token (Socket Mode) — no public webhook host required, exactly
-# like the WhatsApp channel's long-lived socket.
+# receives native Slack events, translates them to the core IncomingTurn
+# shape, drives the orchestrator's ChatAgent, and renders the answer back to
+# Slack. Dual transport, selected by config:
+#   • public_base_url SET   → Events API webhook (Slack-recommended for prod,
+#                             Marketplace-eligible). Signed POSTs to
+#                             <public_base_url>/api/slack/events.
+#   • public_base_url EMPTY → Socket Mode WebSocket (no public host; local dev
+#                             / behind-firewall). Same as the WhatsApp socket.
+# This mirrors the Telegram channel's webhook + long-poll-fallback shape.
 # ===========================================================================
 
 identity:
@@ -17,8 +21,8 @@ identity:
   kind: "channel"
   domain: "slack"
   name: "Slack"
-  version: "0.1.0"                         # === package.json "version"
-  description: "Slack-Channel via Slack Socket Mode (Bot-Token + App-Token). Routet Slack-DMs und @Mentions in den Omadia-Orchestrator — kein öffentlicher Webhook-Host nötig."
+  version: "0.2.0"                         # === package.json "version"
+  description: "Slack-Channel via Events API (Webhook, prod-empfohlen) oder Socket Mode (Fallback ohne Public-Host). Routet Slack-DMs und @Mentions in den Omadia-Orchestrator."
   authors:
     - name: "byte5 GmbH"
       email: "info@omadia.ai"
@@ -43,12 +47,16 @@ lifecycle:
     secrets: "delete"                      # drops the stored bot- + app-token
 
 # ---------------------------------------------------------------------------
-# Setup. The two Slack tokens are SECRETS — collected by the core UI and
+# Setup. The Slack tokens/secrets are SECRETS — collected by the core UI and
 # stored in the per-plugin vault; the plugin reads them at runtime via
-# ctx.secrets.get(...). self_test stays false: validating the token needs a
-# live Slack API round-trip, which the post-submit onConfigure smoke probe
-# does not perform for a channel. Connection status (incl. a bad-token error)
-# is surfaced in the admin UI right after activation instead.
+# ctx.secrets.get(...). Transport is chosen at activation from public_base_url:
+#   • set   → Events API webhook → needs bot_token + signing_secret.
+#   • empty → Socket Mode        → needs bot_token + app_token.
+# app_token / signing_secret are therefore mode-conditional — both are
+# required:false here and validated at runtime with a clear error. self_test
+# stays false: validating a token needs a live Slack round-trip, which the
+# post-submit onConfigure smoke probe does not perform for a channel. The
+# connection status (incl. a bad-token error) is surfaced in the admin UI.
 # ---------------------------------------------------------------------------
 setup:
   fields:
@@ -58,11 +66,23 @@ setup:
       help: "OAuth & Permissions → Bot User OAuth Token. Benötigte Bot-Scopes: app_mentions:read, chat:write, reactions:write, im:history, channels:history, groups:history, mpim:history, users:read."
       required: true
 
+    - key: "public_base_url"
+      type: "url"
+      label: "Public HTTPS Base-URL (Events API)"
+      help: "Öffentliche HTTPS-Origin, unter der die Middleware erreichbar ist (z.B. https://bot.example.com). GESETZT → Events-API-Modus: trage `<base>/api/slack/events` in deiner Slack-App unter Event Subscriptions als Request URL ein. LEER → Socket-Mode-Fallback (kein Public-Host, gut für lokale Dev)."
+      required: false
+
+    - key: "signing_secret"
+      type: "secret"
+      label: "Signing Secret (Events API)"
+      help: "Basic Information → App Credentials → Signing Secret. Verifiziert eingehende Slack-Requests (HMAC). Nur im Events-API-Modus nötig (wenn public_base_url gesetzt ist)."
+      required: false
+
     - key: "app_token"
       type: "secret"
-      label: "App-Level Token (xapp-…)"
-      help: "Basic Information → App-Level Tokens. Erstelle einen Token mit dem Scope `connections:write` und aktiviere Socket Mode. Dieser Token öffnet die WebSocket-Verbindung zu Slack."
-      required: true
+      label: "App-Level Token (xapp-…, nur Socket Mode)"
+      help: "Basic Information → App-Level Tokens. Token mit Scope `connections:write` + Socket Mode aktivieren. Öffnet die WebSocket-Verbindung. Nur nötig, wenn public_base_url LEER ist (Socket-Mode-Fallback)."
+      required: false
 
     - key: "respond_in_channels"
       type: "enum"
@@ -117,12 +137,20 @@ permissions:
 admin_ui_path: "/api/slack-channel/admin/index.html"
 
 # ---------------------------------------------------------------------------
-# Channel block (schema section 14). Slack Socket Mode is a long-lived
-# outbound WebSocket — no inbound webhook routes to mount.
+# Channel block (schema section 14). Declares the PRIMARY (recommended)
+# transport: the Events API webhook. The plugin self-mounts the route via
+# ctx.routes.register and verifies the X-Slack-Signature itself
+# (verify_signature: true). When public_base_url is empty the plugin instead
+# opens a Socket Mode WebSocket at runtime (no route) — the manifest block
+# stays descriptive; the kernel does not auto-wire either path.
 # ---------------------------------------------------------------------------
 channel:
   transport:
-    kind: "websocket"
+    kind: "webhook"
+    routes:
+      - path: "/api/slack/events"
+        method: "POST"
+    verify_signature: true
   capabilities:
     - "text"
   adapters:

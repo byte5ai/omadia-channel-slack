@@ -13,30 +13,38 @@ import {
 import type { PluginContext } from '@omadia/plugin-api';
 
 import { createAdminRouter } from './adminRouter.js';
+import { createEventsApiRouter } from './eventsApiTransport.js';
 import type { SlackTurnMeta } from './inbound.js';
 import { renderAnswer } from './renderer.js';
-import { SlackConnection } from './slackConnection.js';
-import { createChannelState } from './state.js';
+import { SlackChannel } from './slackChannel.js';
+import { SocketModeTransport } from './socketModeTransport.js';
+import { createChannelState, patchState } from './state.js';
+
+const EVENTS_ROUTE_PREFIX = '/api/slack';
+const EVENTS_PATH = `${EVENTS_ROUTE_PREFIX}/events`;
 
 /**
  * Channel-plugin entry. The kernel's dynamic channel resolver imports this
  * module and calls the exported `activate(ctx, core)` (ChannelPlugin "shape
- * 1"). We open the Slack Socket Mode connection in the background, mount the
- * status admin UI, and return a handle the kernel closes on
+ * 1"). Picks a transport from config — the **Events API** webhook when a public
+ * base URL is configured (production-recommended), otherwise **Socket Mode**
+ * (zero-infra fallback for local dev / behind-firewall installs) — mounts the
+ * status admin UI, and returns a handle the kernel closes on
  * deactivate/uninstall.
  */
 export async function activate(ctx: PluginContext, core: CoreApi): Promise<ChannelHandle> {
   const channelId = ctx.agentId;
 
-  // Both tokens are required secrets — collected at install (manifest setup
-  // fields `bot_token` / `app_token`) and stored in the per-plugin vault.
   const botToken = await ctx.secrets.get('bot_token');
-  const appToken = await ctx.secrets.get('app_token');
-  if (!botToken || !appToken) {
+  if (!botToken) {
     throw new Error(
-      '@omadia/channel-slack requires both a Bot token (bot_token, xoxb-…) and an App-Level token (app_token, xapp-…) — configure them in the plugin setup',
+      '@omadia/channel-slack requires a Bot User OAuth Token (bot_token, xoxb-…) — configure it in the plugin setup',
     );
   }
+
+  const publicBaseUrl = (ctx.config.get<string>('public_base_url') ?? '').trim();
+  const mode: 'webhook' | 'socket' = publicBaseUrl ? 'webhook' : 'socket';
+  const requestUrl = publicBaseUrl ? joinUrl(publicBaseUrl, EVENTS_PATH) : undefined;
 
   const respondInChannels =
     ctx.config.get<string>('respond_in_channels') === 'all' ? 'all' : 'mention';
@@ -54,19 +62,19 @@ export async function activate(ctx: PluginContext, core: CoreApi): Promise<Chann
   }
 
   const state = createChannelState();
+  state.mode = mode;
 
-  // `let conn!` so the onMessage closure can reference the instance it is
+  // `let channel!` so the onMessage closure can reference the instance it is
   // attached to; the closure only fires once messages arrive (long after
-  // construction), by which time `conn` is assigned.
-  let conn!: SlackConnection;
-  conn = new SlackConnection({
+  // construction), by which time `channel` is assigned.
+  let channel!: SlackChannel;
+  channel = new SlackChannel({
     channelId,
     botToken,
-    appToken,
     log: (level, message, context) => core.log(level, message, context),
     state,
     policy: { respondInChannels, allowDms, allowlist },
-    onMessage: (turn) => handleTurn(agent, core, conn, turn),
+    onMessage: (turn) => handleTurn(agent, core, channel, turn),
   });
 
   // Status admin UI. web-ui renders this as an iframe (manifest
@@ -74,39 +82,100 @@ export async function activate(ctx: PluginContext, core: CoreApi): Promise<Chann
   // resolves through the `/bot-api` rewrite.
   const here = path.dirname(fileURLToPath(import.meta.url));
   const uiAssetsPath = path.resolve(here, '../assets/admin-ui');
-  const disposeRoutes = ctx.routes.register(
-    '/api/slack-channel/admin',
-    createAdminRouter({
-      uiAssetsPath,
-      state,
-      smokeMode: ctx.smokeMode,
-      onReconnect: () => conn.reconnect(),
-    }),
+
+  const disposers: Array<() => void> = [];
+  let onReconnect: () => Promise<void>;
+
+  disposers.push(
+    ctx.routes.register(
+      '/api/slack-channel/admin',
+      createAdminRouter({
+        uiAssetsPath,
+        state,
+        smokeMode: ctx.smokeMode,
+        ...(requestUrl ? { requestUrl } : {}),
+        onReconnect: () => onReconnect(),
+      }),
+    ),
   );
 
-  // Non-blocking — auth + Socket Mode handshake can exceed the activate budget.
-  conn.start();
+  if (mode === 'webhook') {
+    const signingSecret = await ctx.secrets.get('signing_secret');
+    if (!signingSecret) {
+      throw new Error(
+        '@omadia/channel-slack: a public_base_url is set (Events API mode) but no signing_secret — add the Slack app Signing Secret in the plugin setup, or clear public_base_url to use Socket Mode',
+      );
+    }
 
-  core.log('info', 'Slack channel activated — open the admin UI to check connection status', {
+    disposers.push(
+      ctx.routes.register(
+        EVENTS_ROUTE_PREFIX,
+        createEventsApiRouter({ signingSecret, channel, log: core.log.bind(core), state }),
+      ),
+    );
+
+    // Learn identity + validate the bot token in the background; the webhook
+    // route is already mounted so url_verification can pass immediately.
+    onReconnect = () => initWebhook(channel, core, state);
+    void initWebhook(channel, core, state);
+
+    core.log('info', 'Slack channel activated in Events API (webhook) mode', {
+      adminUi: '/api/slack-channel/admin/index.html',
+      requestUrl,
+      respondInChannels,
+      allowDms,
+      allowlisted: allowlist.size,
+    });
+    core.log(
+      'info',
+      `Slack Events API ready — set this Request URL in your Slack app (Event Subscriptions): ${requestUrl ?? ''}`,
+    );
+
+    return { async close() { for (const d of disposers.reverse()) d(); } };
+  }
+
+  // Socket Mode fallback.
+  const appToken = await ctx.secrets.get('app_token');
+  if (!appToken) {
+    throw new Error(
+      '@omadia/channel-slack: no public_base_url set (Socket Mode) but no app_token — add an App-Level Token (xapp-…, scope connections:write), or set public_base_url to use the Events API',
+    );
+  }
+
+  const transport = new SocketModeTransport({ appToken, channel, log: core.log.bind(core), state });
+  onReconnect = () => transport.reconnect();
+  transport.start();
+  disposers.push(() => void transport.close());
+
+  core.log('info', 'Slack channel activated in Socket Mode', {
     adminUi: '/api/slack-channel/admin/index.html',
     respondInChannels,
     allowDms,
     allowlisted: allowlist.size,
   });
 
-  return {
-    async close() {
-      disposeRoutes();
-      await conn.close();
-    },
-  };
+  return { async close() { for (const d of disposers.reverse()) d(); } };
+}
+
+/** Validate the bot token + resolve identity for webhook mode, mapping the
+ *  outcome onto the connection status. */
+async function initWebhook(channel: SlackChannel, core: CoreApi, state: ReturnType<typeof createChannelState>): Promise<void> {
+  try {
+    patchState(state, { status: 'connecting', lastError: null });
+    await channel.init();
+    patchState(state, { status: 'connected' });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    patchState(state, { status: 'error', lastError: message });
+    core.log('error', 'Slack bot token validation failed', { error: message });
+  }
 }
 
 /** Drive one orchestrator turn and ship the rendered answer back to Slack. */
 async function handleTurn(
   agent: ChatAgent,
   core: CoreApi,
-  conn: SlackConnection,
+  channel: SlackChannel,
   turn: IncomingTurn,
 ): Promise<void> {
   const meta = turn.metadata as unknown as SlackTurnMeta;
@@ -122,14 +191,14 @@ async function handleTurn(
     }
     const text = renderAnswer(answer);
     if (text.trim().length === 0) return;
-    await conn.sendText(turn.conversationId, text, meta.threadTs);
+    await channel.sendText(turn.conversationId, text, meta.threadTs);
   } catch (err) {
     core.log('error', 'failed to handle Slack turn', {
       error: (err as Error).message,
       conversationId: turn.conversationId,
     });
     try {
-      await conn.sendText(
+      await channel.sendText(
         turn.conversationId,
         '⚠️ Entschuldigung, dabei ist ein Fehler aufgetreten. Bitte versuche es erneut.',
         meta.threadTs,
@@ -163,4 +232,9 @@ function parseAllowlist(raw: string): Set<string> {
       .map((entry) => entry.trim())
       .filter((entry) => entry.length > 0),
   );
+}
+
+function joinUrl(base: string, suffixPath: string): string {
+  const trimmed = base.endsWith('/') ? base.slice(0, -1) : base;
+  return `${trimmed}${suffixPath.startsWith('/') ? suffixPath : `/${suffixPath}`}`;
 }

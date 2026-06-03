@@ -1,4 +1,3 @@
-import { SocketModeClient } from '@slack/socket-mode';
 import { LogLevel } from '@slack/logger';
 import { WebClient } from '@slack/web-api';
 
@@ -8,7 +7,6 @@ import {
   buildIncomingTurn,
   extractText,
   stripMention,
-  type SlackEnvelopeBody,
   type SlackMessageEvent,
 } from './inbound.js';
 import { makeSlackLogger, type LogSink } from './logger.js';
@@ -23,10 +21,9 @@ export interface AccessPolicy {
   allowlist: Set<string>;
 }
 
-export interface SlackConnectionDeps {
+export interface SlackChannelDeps {
   channelId: string;
   botToken: string;
-  appToken: string;
   log: LogSink;
   state: ChannelState;
   policy: AccessPolicy;
@@ -41,100 +38,54 @@ const ACK_EMOJI = 'eyes';
 const HANDLED_KEYS_MAX = 1_000;
 
 /**
- * Owns the long-lived Slack Socket Mode connection: validate the bot token via
- * `auth.test`, open the WebSocket, drain inbound events, and send replies +
- * reactions through the Web API. Drives the shared {@link ChannelState} so the
- * admin UI can render connection status, and forwards each inbound text message
- * as an {@link IncomingTurn}.
+ * Transport-agnostic Slack channel core. Owns the {@link WebClient} (outbound
+ * Web API + identity), the inbound de-duplication + access policy, and the
+ * native-event → {@link IncomingTurn} translation. Both transports
+ * (Socket Mode and the Events API webhook) funnel every inbound payload through
+ * {@link ingest}, so the filtering, loop-guard, ACK reaction and reply path are
+ * identical regardless of how the event arrived.
  */
-export class SlackConnection {
-  private web: WebClient | undefined;
-  private socket: SocketModeClient | undefined;
+export class SlackChannel {
+  private readonly web: WebClient;
   private botUserId = '';
-  private intentionalClose = false;
   /** `${channel}:${ts}` of messages already handled — Slack delivers a mention
-   *  as BOTH an `app_mention` and a `message` event, so we de-duplicate. */
+   *  as BOTH an `app_mention` and a `message` event (and the Events API may
+   *  retry), so we de-duplicate centrally. */
   private readonly handledKeys = new Set<string>();
 
-  constructor(private readonly deps: SlackConnectionDeps) {}
-
-  /** Kick off the connection without blocking — auth + the Socket Mode
-   *  handshake can exceed the activate budget, so we drive state transitions
-   *  in the background. */
-  start(): void {
-    void this.connect();
+  constructor(private readonly deps: SlackChannelDeps) {
+    this.web = new WebClient(deps.botToken, {
+      logger: makeSlackLogger(deps.log),
+      logLevel: LogLevel.ERROR,
+    });
   }
 
-  private async connect(): Promise<void> {
-    if (this.intentionalClose) return;
-    const logger = makeSlackLogger(this.deps.log);
-    try {
-      patchState(this.deps.state, { status: 'connecting', lastError: null });
-
-      this.web = new WebClient(this.deps.botToken, { logger, logLevel: LogLevel.ERROR });
-
-      // Validate the bot token and learn our own identity (needed to ignore our
-      // own messages and to strip the bot mention from `@bot …` text).
-      const auth = await this.web.auth.test();
-      this.botUserId = typeof auth.user_id === 'string' ? auth.user_id : '';
-      patchState(this.deps.state, {
-        me: {
-          botUserId: this.botUserId,
-          teamId: typeof auth.team_id === 'string' ? auth.team_id : '',
-          ...(typeof auth.user === 'string' ? { botUserName: auth.user } : {}),
-          ...(typeof auth.team === 'string' ? { teamName: auth.team } : {}),
-        },
-      });
-      this.deps.log('info', 'Slack bot token validated', {
+  /** Validate the bot token and learn our own identity — needed to ignore our
+   *  own messages and strip the bot mention from `@bot …` text. Throws on a bad
+   *  token so the caller can surface an `error` status. */
+  async init(): Promise<void> {
+    const auth = await this.web.auth.test();
+    this.botUserId = typeof auth.user_id === 'string' ? auth.user_id : '';
+    patchState(this.deps.state, {
+      me: {
         botUserId: this.botUserId,
-        team: auth.team,
-      });
-
-      const socket = new SocketModeClient({
-        appToken: this.deps.appToken,
-        logger,
-        logLevel: LogLevel.ERROR,
-      });
-      this.socket = socket;
-
-      socket.on('connected', () => {
-        patchState(this.deps.state, { status: 'connected', lastError: null });
-        this.deps.log('info', 'Slack Socket Mode connected');
-      });
-      socket.on('connecting', () => patchState(this.deps.state, { status: 'connecting' }));
-      socket.on('reconnecting', () => patchState(this.deps.state, { status: 'connecting' }));
-      socket.on('disconnected', (err?: unknown) => {
-        if (this.intentionalClose) return;
-        patchState(this.deps.state, { status: 'disconnected' });
-        this.deps.log('warn', 'Slack Socket Mode disconnected — auto-reconnecting', {
-          ...(err ? { error: errMessage(err) } : {}),
-        });
-      });
-
-      // Single generic listener: we ACK every envelope (so Slack never retries)
-      // and dispatch only Events-API message/app_mention payloads.
-      socket.on('slack_event', async (args: { ack: () => Promise<void>; body: SlackEnvelopeBody }) => {
-        try {
-          await args.ack();
-        } catch {
-          /* ack failure is non-fatal — Slack will retry, our dedup guards it */
-        }
-        const body = args.body;
-        if (!body || body.type !== 'events_api' || !body.event) return;
-        const event = body.event;
-        if (event.type !== 'message' && event.type !== 'app_mention') return;
-        await this.onEvent(event, body.team_id);
-      });
-
-      await socket.start();
-    } catch (err) {
-      const message = errMessage(err);
-      patchState(this.deps.state, { status: 'error', lastError: message });
-      this.deps.log('error', 'failed to start Slack connection', { error: message });
-    }
+        teamId: typeof auth.team_id === 'string' ? auth.team_id : '',
+        ...(typeof auth.user === 'string' ? { botUserName: auth.user } : {}),
+        ...(typeof auth.team === 'string' ? { teamName: auth.team } : {}),
+      },
+    });
+    this.deps.log('info', 'Slack bot token validated', {
+      botUserId: this.botUserId,
+      team: auth.team,
+    });
   }
 
-  private async onEvent(event: SlackMessageEvent, teamId: string | undefined): Promise<void> {
+  /**
+   * Process one inbound Slack event (a `message` or `app_mention`). Idempotent
+   * per `${channel}:${ts}`. Applies the loop-guard, access policy and allowlist,
+   * then ACKs with a reaction and drives an orchestrator turn.
+   */
+  async ingest(event: SlackMessageEvent, teamId: string | undefined): Promise<void> {
     const key = `${event.channel}:${event.ts}`;
     if (this.handledKeys.has(key)) return;
     this.handledKeys.add(key);
@@ -194,6 +145,7 @@ export class SlackConnection {
         channelType,
         isMention,
       });
+      patchState(this.deps.state, { lastInboundAt: Date.now() });
 
       // ACK first (OpenClaw-style) so the user immediately sees it was picked up.
       void this.sendReaction(event.channel, event.ts, ACK_EMOJI);
@@ -209,7 +161,6 @@ export class SlackConnection {
   /** Post a message. `threadTs` threads the reply (channel messages); omit for
    *  DMs to reply at the top level. */
   async sendText(channel: string, text: string, threadTs?: string): Promise<void> {
-    if (!this.web) throw new Error('Slack Web client not connected');
     await this.web.chat.postMessage({
       channel,
       text,
@@ -221,25 +172,11 @@ export class SlackConnection {
   /** Add an emoji reaction (ACK). Best-effort — never throws into the caller. */
   async sendReaction(channel: string, timestamp: string, name: string): Promise<void> {
     try {
-      await this.web?.reactions.add({ channel, timestamp, name });
+      await this.web.reactions.add({ channel, timestamp, name });
     } catch (err) {
       // `already_reacted` and missing-scope are common + harmless here.
       this.deps.log('warn', 'failed to add Slack reaction', { error: errMessage(err) });
     }
-  }
-
-  /** Operator-initiated reconnect: tear down the socket and re-open it. */
-  async reconnect(): Promise<void> {
-    this.deps.log('info', 'operator requested Slack reconnect');
-    try {
-      await this.socket?.disconnect();
-    } catch {
-      /* noop — we're replacing it anyway */
-    }
-    this.socket = undefined;
-    this.web = undefined;
-    patchState(this.deps.state, { status: 'connecting', lastError: null });
-    void this.connect();
   }
 
   private trimHandledKeys(): void {
@@ -250,20 +187,8 @@ export class SlackConnection {
       if (--drop <= 0) break;
     }
   }
-
-  /** Release the socket (ChannelHandle.close). */
-  async close(): Promise<void> {
-    this.intentionalClose = true;
-    try {
-      await this.socket?.disconnect();
-    } catch {
-      /* noop */
-    }
-    this.socket = undefined;
-    this.web = undefined;
-  }
 }
 
-function errMessage(err: unknown): string {
+export function errMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }

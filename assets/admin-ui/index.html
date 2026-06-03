@@ -30,18 +30,37 @@
       .sl-dot[data-state='disconnected'] { background: var(--warning); }
       .sl-dot[data-state='error'] { background: var(--danger); }
       .sl-state-label { font-weight: 600; color: var(--fg-strong); }
+      .sl-mode-pill {
+        font-size: 0.75rem;
+        font-weight: 600;
+        padding: 0.1rem 0.5rem;
+        border-radius: var(--radius-pill, 9999px);
+        border: 1px solid var(--border);
+        color: var(--fg-muted);
+      }
       .sl-me { font-family: var(--font-mono); color: var(--fg-strong); }
+      .sl-url {
+        font-family: var(--font-mono);
+        font-size: 0.85rem;
+        word-break: break-all;
+        background: var(--bg-elevated);
+        border: 1px solid var(--border);
+        border-radius: var(--radius-sm, 8px);
+        padding: 0.5rem 0.6rem;
+        margin: 0.4rem 0;
+      }
       .sl-actions { margin-top: 1rem; }
       .sl-steps { margin: 0.5rem 0 0; padding-left: 1.1rem; color: var(--fg-muted); }
       .sl-steps li { margin: 0.35rem 0; }
       .sl-steps code { font-family: var(--font-mono); }
+      .sl-muted { color: var(--fg-muted); font-size: 0.85rem; }
     </style>
 
     <div class="sl-wrap">
       <h1>Slack</h1>
       <p class="harness-subtitle">
-        Verbindet eine Slack-App über <b>Socket Mode</b> mit deinem Omadia-Orchestrator —
-        kein öffentlicher Webhook nötig. DMs und @Mentions werden durch deine Agenten geroutet.
+        Verbindet eine Slack-App mit deinem Omadia-Orchestrator. DMs und @Mentions
+        werden durch deine Agenten geroutet.
       </p>
 
       <div id="global-err" class="harness-banner-error" role="alert" hidden></div>
@@ -49,6 +68,7 @@
       <div class="sl-status-row">
         <span id="dot" class="sl-dot" data-state="starting" aria-hidden="true"></span>
         <span id="state-label" class="sl-state-label">Lade…</span>
+        <span id="mode-pill" class="sl-mode-pill" hidden></span>
       </div>
 
       <!-- Connected -->
@@ -56,25 +76,33 @@
         <div class="harness-banner-info" role="status">
           Verbunden mit Workspace <span id="me" class="sl-me">—</span>
         </div>
+        <p id="last-inbound" class="sl-muted" hidden></p>
+      </section>
+
+      <!-- Events API: Request URL to paste into Slack -->
+      <section id="webhook-section" hidden>
+        <p><b>Request URL</b> — in deiner Slack-App unter <i>Event Subscriptions</i> eintragen:</p>
+        <div id="request-url" class="sl-url">—</div>
+        <p id="url-verified" class="sl-muted">Warte auf Slacks <code>url_verification</code>-Handshake…</p>
       </section>
 
       <!-- Setup help (shown until connected) -->
       <section id="setup-section" hidden>
         <div class="harness-empty">
-          <p>So richtest du die Slack-App ein:</p>
+          <p>So richtest du die Slack-App ein (<code>api.slack.com/apps</code>):</p>
           <ol class="sl-steps">
-            <li>Auf <code>api.slack.com/apps</code> eine App erstellen.</li>
-            <li><b>Socket Mode</b> aktivieren und einen App-Level-Token mit Scope
-              <code>connections:write</code> erzeugen (<code>xapp-…</code>).</li>
-            <li>Unter <b>OAuth &amp; Permissions</b> die Bot-Scopes setzen
+            <li><b>OAuth &amp; Permissions</b> → Bot-Scopes setzen
               (<code>app_mentions:read</code>, <code>chat:write</code>,
               <code>reactions:write</code>, <code>im:history</code>,
-              <code>channels:history</code>, <code>users:read</code>) und die App
+              <code>channels:history</code>, <code>users:read</code>) → App
               installieren → Bot-Token (<code>xoxb-…</code>).</li>
-            <li>Unter <b>Event Subscriptions</b> die Bot-Events <code>app_mention</code>,
-              <code>message.im</code> (und optional <code>message.channels</code>)
-              abonnieren.</li>
-            <li>Beide Tokens in den Plugin-Einstellungen hinterlegen.</li>
+            <li id="setup-events"><b>Events API:</b> Signing Secret (Basic Information)
+              hinterlegen, dann unter <b>Event Subscriptions</b> die Request URL oben
+              eintragen und die Bot-Events <code>app_mention</code>,
+              <code>message.im</code> (opt. <code>message.channels</code>) abonnieren.</li>
+            <li id="setup-socket"><b>Socket Mode:</b> Socket Mode aktivieren + App-Level-Token
+              mit <code>connections:write</code> (<code>xapp-…</code>) hinterlegen.</li>
+            <li>Bot in die gewünschten Channels einladen (<code>/invite @bot</code>).</li>
           </ol>
         </div>
       </section>
@@ -95,22 +123,29 @@
         disconnected: 'Verbindung getrennt — verbinde neu…',
         error: 'Fehler',
       };
+      const MODE_LABELS = { webhook: 'Events API', socket: 'Socket Mode' };
 
-      function show(id, visible) {
-        el(id).hidden = !visible;
+      const show = (id, visible) => { el(id).hidden = !visible; };
+
+      function ago(ts) {
+        if (!ts) return '';
+        const s = Math.max(0, Math.round((Date.now() - ts) / 1000));
+        if (s < 60) return `vor ${s}s`;
+        if (s < 3600) return `vor ${Math.round(s / 60)}min`;
+        return `vor ${Math.round(s / 3600)}h`;
       }
 
       function render(s) {
         el('dot').dataset.state = s.status;
         el('state-label').textContent = STATE_LABELS[s.status] || s.status;
 
+        const pill = el('mode-pill');
+        if (s.mode) { pill.textContent = MODE_LABELS[s.mode] || s.mode; pill.hidden = false; }
+        else pill.hidden = true;
+
         const err = el('global-err');
-        if (s.lastError) {
-          err.textContent = s.lastError;
-          err.hidden = false;
-        } else {
-          err.hidden = true;
-        }
+        if (s.lastError) { err.textContent = s.lastError; err.hidden = false; }
+        else err.hidden = true;
 
         const connected = s.status === 'connected';
         show('connected-section', connected);
@@ -119,8 +154,26 @@
           const bot = s.me.botUserName ? `@${s.me.botUserName}` : s.me.botUserId;
           el('me').textContent = `${team} · ${bot}`;
         }
+        const li = el('last-inbound');
+        if (connected && s.lastInboundAt) {
+          li.textContent = `Letztes Event ${ago(s.lastInboundAt)}`;
+          li.hidden = false;
+        } else li.hidden = true;
 
+        // Events API: show the Request URL + verification state.
+        const isWebhook = s.mode === 'webhook';
+        show('webhook-section', isWebhook && !!s.requestUrl);
+        if (isWebhook && s.requestUrl) {
+          el('request-url').textContent = s.requestUrl;
+          el('url-verified').textContent = s.urlVerified
+            ? '✓ Request URL von Slack verifiziert.'
+            : 'Warte auf Slacks url_verification-Handshake…';
+        }
+
+        // Setup help until connected; tailor the mode-specific lines.
         show('setup-section', !connected);
+        show('setup-events', s.mode !== 'socket');
+        show('setup-socket', s.mode !== 'webhook');
       }
 
       async function poll() {

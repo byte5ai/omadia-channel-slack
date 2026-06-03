@@ -8,8 +8,10 @@ export interface AdminRouterDeps {
   state: ChannelState;
   /** True during the kernel's admin-route smoke probe — return mock data. */
   smokeMode: boolean;
-  /** Operator-triggered reconnect (tear down + re-open the socket). */
+  /** Operator-triggered reconnect (re-validate token / re-open the socket). */
   onReconnect: () => Promise<void>;
+  /** Events API mode only: the Request URL the operator pastes into Slack. */
+  requestUrl?: string;
 }
 
 /**
@@ -33,7 +35,11 @@ export function createAdminRouter(deps: AdminRouterDeps): Router {
       res.json({
         ok: true,
         status: 'connected',
+        mode: 'webhook',
         me: { teamId: 'T000', teamName: 'Smoke Test', botUserId: 'U000', botUserName: 'omadia' },
+        requestUrl: deps.requestUrl ?? null,
+        urlVerified: true,
+        lastInboundAt: deps.state.lastInboundAt ?? null,
         lastError: null,
         updatedAt: deps.state.updatedAt,
       });
@@ -43,7 +49,11 @@ export function createAdminRouter(deps: AdminRouterDeps): Router {
     res.json({
       ok: true,
       status: s.status,
+      mode: s.mode,
       me: s.me,
+      requestUrl: deps.requestUrl ?? null,
+      urlVerified: s.urlVerified ?? false,
+      lastInboundAt: s.lastInboundAt ?? null,
       lastError: s.lastError,
       updatedAt: s.updatedAt,
     });
