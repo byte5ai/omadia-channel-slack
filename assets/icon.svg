@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" role="img" aria-label="Slack channel">
+  <rect width="256" height="256" rx="56" fill="#1A1D21" />
+  <g transform="translate(60 60)">
+    <!-- Slack mark, 4-colour, centred in the 136x136 inner box -->
+    <path fill="#36C5F0" d="M30 84a14 14 0 1 1-14-14h14v14zm7 0a14 14 0 0 1 28 0v35a14 14 0 0 1-28 0V84z" />
+    <path fill="#2EB67D" d="M52 30a14 14 0 1 1 14-14v14H52zm0 7a14 14 0 0 1 0 28H17a14 14 0 0 1 0-28h35z" />
+    <path fill="#ECB22E" d="M106 52a14 14 0 1 1 14 14h-14V52zm-7 0a14 14 0 0 1-28 0V17a14 14 0 0 1 28 0v35z" />
+    <path fill="#E01E5A" d="M84 106a14 14 0 1 1-14 14v-14h14zm0-7a14 14 0 0 1 0-28h35a14 14 0 0 1 0 28H84z" />
+  </g>
+</svg>

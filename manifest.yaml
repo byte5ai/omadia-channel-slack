@@ -1,0 +1,130 @@
+schema_version: "1"
+
+# ===========================================================================
+# @omadia/channel-slack — Slack channel (Slack Socket Mode)
+# ---------------------------------------------------------------------------
+# Schema of truth: docs/harness-platform/manifest-schema.v1.yaml (section 14).
+# A channel ROUTES turns — it has NO capabilities / playbook of its own. It
+# receives native Slack events over a Socket Mode WebSocket, translates them
+# to the core IncomingTurn shape, drives the orchestrator's ChatAgent, and
+# renders the answer back to Slack. Auth is a Slack app's bot-token + an
+# app-level token (Socket Mode) — no public webhook host required, exactly
+# like the WhatsApp channel's long-lived socket.
+# ===========================================================================
+
+identity:
+  id: "@omadia/channel-slack"             # === package.json "name"
+  kind: "channel"
+  domain: "slack"
+  name: "Slack"
+  version: "0.1.0"                         # === package.json "version"
+  description: "Slack-Channel via Slack Socket Mode (Bot-Token + App-Token). Routet Slack-DMs und @Mentions in den Omadia-Orchestrator — kein öffentlicher Webhook-Host nötig."
+  authors:
+    - name: "byte5 GmbH"
+      email: "info@omadia.ai"
+      url: "https://omadia.ai"
+  license: "MIT"
+  homepage: "https://github.com/byte5ai/omadia-channel-slack"
+  icon: "./assets/icon.svg"
+  categories:
+    - "communication"
+
+compat:
+  core: ">=1.0 <2.0"
+  node: ">=20"
+
+depends_on: []
+
+lifecycle:
+  entry: "dist/plugin.js"                  # exports `activate(ctx, core)` (ChannelPlugin shape 1)
+  uninstall_policy:
+    entities: "delete"
+    memory: "delete"
+    secrets: "delete"                      # drops the stored bot- + app-token
+
+# ---------------------------------------------------------------------------
+# Setup. The two Slack tokens are SECRETS — collected by the core UI and
+# stored in the per-plugin vault; the plugin reads them at runtime via
+# ctx.secrets.get(...). self_test stays false: validating the token needs a
+# live Slack API round-trip, which the post-submit onConfigure smoke probe
+# does not perform for a channel. Connection status (incl. a bad-token error)
+# is surfaced in the admin UI right after activation instead.
+# ---------------------------------------------------------------------------
+setup:
+  fields:
+    - key: "bot_token"
+      type: "secret"
+      label: "Bot User OAuth Token (xoxb-…)"
+      help: "OAuth & Permissions → Bot User OAuth Token. Benötigte Bot-Scopes: app_mentions:read, chat:write, reactions:write, im:history, channels:history, groups:history, mpim:history, users:read."
+      required: true
+
+    - key: "app_token"
+      type: "secret"
+      label: "App-Level Token (xapp-…)"
+      help: "Basic Information → App-Level Tokens. Erstelle einen Token mit dem Scope `connections:write` und aktiviere Socket Mode. Dieser Token öffnet die WebSocket-Verbindung zu Slack."
+      required: true
+
+    - key: "respond_in_channels"
+      type: "enum"
+      label: "Verhalten in Channels"
+      help: "Wann antwortet der Bot in Channels/Gruppen? `mention` (empfohlen): nur wenn der Bot direkt mit @ erwähnt wird. `all`: auf jede Nachricht in Channels, in denen der Bot Mitglied ist (laut)."
+      required: false
+      default: "mention"
+      enum:
+        - { value: "mention", label: "Nur bei @Mention" }
+        - { value: "all", label: "Auf jede Nachricht" }
+
+    - key: "allow_dms"
+      type: "boolean"
+      label: "Direktnachrichten zulassen"
+      help: "Wenn aktiv, antwortet der Bot auf 1:1-DMs. Andernfalls bleiben DMs still."
+      required: false
+      default: true
+
+    - key: "allowlist"
+      type: "string"
+      label: "Allowlist (optional)"
+      help: "Komma-getrennte Slack-Channel-IDs (C…) und/oder User-IDs (U…), die mit dem Bot interagieren dürfen. Leer = alle erlaubten Konversationen."
+      required: false
+      default: ""
+
+  self_test: false
+
+# ---------------------------------------------------------------------------
+# Permissions. Slack tokens live in the vault (ctx.secrets), so no ctx.memory
+# auth-state persistence is needed. network.outbound is declared for the
+# operator permissions summary — the Slack WebClient + Socket Mode client open
+# their own connections (they do not route through ctx.http), so this list is
+# descriptive, not enforced for this plugin.
+# ---------------------------------------------------------------------------
+permissions:
+  memory:
+    reads: []
+    writes: []
+  graph:
+    reads: []
+    writes: []
+  network:
+    outbound:
+      - "slack.com"
+      - "*.slack.com"
+  filesystem:
+    scratch: false
+
+# Generic admin-UI iframe surface (rendered by web-ui for any plugin that
+# declares admin_ui_path). This is where the operator sees connection status,
+# the linked workspace, and can trigger a reconnect.
+admin_ui_path: "/api/slack-channel/admin/index.html"
+
+# ---------------------------------------------------------------------------
+# Channel block (schema section 14). Slack Socket Mode is a long-lived
+# outbound WebSocket — no inbound webhook routes to mount.
+# ---------------------------------------------------------------------------
+channel:
+  transport:
+    kind: "websocket"
+  capabilities:
+    - "text"
+  adapters:
+    - "text"
+    - "markdown"

@@ -1,0 +1,39 @@
+{
+  "name": "@omadia/channel-slack",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/plugin.js",
+  "description": "Slack channel for Omadia — Slack Socket Mode (no public webhook) with bot-token + app-token auth. Routes Slack DMs and @mentions into the Omadia orchestrator.",
+  "license": "MIT",
+  "homepage": "https://github.com/byte5ai/omadia-channel-slack",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/byte5ai/omadia-channel-slack.git"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "build": "node scripts/build-zip.mjs",
+    "clean": "rm -rf dist out"
+  },
+  "dependencies": {
+    "@slack/logger": "^4.0.0",
+    "@slack/socket-mode": "^2.0.0",
+    "@slack/web-api": "^7.0.0"
+  },
+  "peerDependencies": {
+    "@omadia/channel-sdk": "*",
+    "@omadia/plugin-api": "*",
+    "express": "^5.0.0"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.6",
+    "@types/node": "^22.0.0",
+    "esbuild": "^0.24.0",
+    "express": "^5.0.0",
+    "typescript": "^5.6.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

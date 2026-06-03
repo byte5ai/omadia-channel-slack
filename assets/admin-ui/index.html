@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="de">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Slack — Omadia</title>
+    <!-- Harness baseline stylesheet (byte5 tokens, light/dark, .harness-* helpers). -->
+    <link rel="stylesheet" href="/bot-api/_harness/admin-ui.css" />
+  </head>
+  <body>
+    <!-- #region builder:admin-ui-body -->
+    <style>
+      .sl-wrap { max-width: var(--harness-iframe-max, 812px); }
+      .sl-status-row {
+        display: flex;
+        align-items: center;
+        gap: 0.6rem;
+        margin: 1rem 0;
+      }
+      .sl-dot {
+        width: 0.7rem;
+        height: 0.7rem;
+        border-radius: var(--radius-pill, 9999px);
+        background: var(--fg-subtle);
+        flex: none;
+      }
+      .sl-dot[data-state='connected'] { background: var(--success); }
+      .sl-dot[data-state='connecting'],
+      .sl-dot[data-state='starting'],
+      .sl-dot[data-state='disconnected'] { background: var(--warning); }
+      .sl-dot[data-state='error'] { background: var(--danger); }
+      .sl-state-label { font-weight: 600; color: var(--fg-strong); }
+      .sl-me { font-family: var(--font-mono); color: var(--fg-strong); }
+      .sl-actions { margin-top: 1rem; }
+      .sl-steps { margin: 0.5rem 0 0; padding-left: 1.1rem; color: var(--fg-muted); }
+      .sl-steps li { margin: 0.35rem 0; }
+      .sl-steps code { font-family: var(--font-mono); }
+    </style>
+
+    <div class="sl-wrap">
+      <h1>Slack</h1>
+      <p class="harness-subtitle">
+        Verbindet eine Slack-App über <b>Socket Mode</b> mit deinem Omadia-Orchestrator —
+        kein öffentlicher Webhook nötig. DMs und @Mentions werden durch deine Agenten geroutet.
+      </p>
+
+      <div id="global-err" class="harness-banner-error" role="alert" hidden></div>
+
+      <div class="sl-status-row">
+        <span id="dot" class="sl-dot" data-state="starting" aria-hidden="true"></span>
+        <span id="state-label" class="sl-state-label">Lade…</span>
+      </div>
+
+      <!-- Connected -->
+      <section id="connected-section" hidden>
+        <div class="harness-banner-info" role="status">
+          Verbunden mit Workspace <span id="me" class="sl-me">—</span>
+        </div>
+      </section>
+
+      <!-- Setup help (shown until connected) -->
+      <section id="setup-section" hidden>
+        <div class="harness-empty">
+          <p>So richtest du die Slack-App ein:</p>
+          <ol class="sl-steps">
+            <li>Auf <code>api.slack.com/apps</code> eine App erstellen.</li>
+            <li><b>Socket Mode</b> aktivieren und einen App-Level-Token mit Scope
+              <code>connections:write</code> erzeugen (<code>xapp-…</code>).</li>
+            <li>Unter <b>OAuth &amp; Permissions</b> die Bot-Scopes setzen
+              (<code>app_mentions:read</code>, <code>chat:write</code>,
+              <code>reactions:write</code>, <code>im:history</code>,
+              <code>channels:history</code>, <code>users:read</code>) und die App
+              installieren → Bot-Token (<code>xoxb-…</code>).</li>
+            <li>Unter <b>Event Subscriptions</b> die Bot-Events <code>app_mention</code>,
+              <code>message.im</code> (und optional <code>message.channels</code>)
+              abonnieren.</li>
+            <li>Beide Tokens in den Plugin-Einstellungen hinterlegen.</li>
+          </ol>
+        </div>
+      </section>
+
+      <div class="sl-actions">
+        <button id="reconnect-btn" class="harness-btn" type="button">Neu verbinden</button>
+      </div>
+    </div>
+
+    <script>
+      const POLL_MS = 2500;
+      const el = (id) => document.getElementById(id);
+
+      const STATE_LABELS = {
+        starting: 'Starte…',
+        connecting: 'Verbinde mit Slack…',
+        connected: 'Verbunden',
+        disconnected: 'Verbindung getrennt — verbinde neu…',
+        error: 'Fehler',
+      };
+
+      function show(id, visible) {
+        el(id).hidden = !visible;
+      }
+
+      function render(s) {
+        el('dot').dataset.state = s.status;
+        el('state-label').textContent = STATE_LABELS[s.status] || s.status;
+
+        const err = el('global-err');
+        if (s.lastError) {
+          err.textContent = s.lastError;
+          err.hidden = false;
+        } else {
+          err.hidden = true;
+        }
+
+        const connected = s.status === 'connected';
+        show('connected-section', connected);
+        if (connected && s.me) {
+          const team = s.me.teamName || s.me.teamId || '—';
+          const bot = s.me.botUserName ? `@${s.me.botUserName}` : s.me.botUserId;
+          el('me').textContent = `${team} · ${bot}`;
+        }
+
+        show('setup-section', !connected);
+      }
+
+      async function poll() {
+        try {
+          const data = await fetch('api/status', { cache: 'no-store' }).then((r) => r.json());
+          if (!data.ok) throw new Error(data.error || 'Statusabfrage fehlgeschlagen');
+          render(data);
+        } catch (e) {
+          const err = el('global-err');
+          err.textContent = e.message;
+          err.hidden = false;
+        }
+      }
+
+      el('reconnect-btn').addEventListener('click', async () => {
+        const btn = el('reconnect-btn');
+        btn.disabled = true;
+        try {
+          const data = await fetch('api/reconnect', { method: 'POST' }).then((r) => r.json());
+          if (!data.ok) throw new Error(data.error || 'Neu verbinden fehlgeschlagen');
+          await poll();
+        } catch (e) {
+          const err = el('global-err');
+          err.textContent = e.message;
+          err.hidden = false;
+        } finally {
+          btn.disabled = false;
+        }
+      });
+
+      poll();
+      setInterval(poll, POLL_MS);
+    </script>
+    <!-- #endregion -->
+  </body>
+</html>
