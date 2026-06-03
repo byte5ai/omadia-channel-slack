@@ -21,7 +21,7 @@ identity:
   kind: "channel"
   domain: "slack"
   name: "Slack"
-  version: "0.2.0"                         # === package.json "version"
+  version: "0.2.1"                         # === package.json "version"
   description: "Slack-Channel via Events API (Webhook, prod-empfohlen) oder Socket Mode (Fallback ohne Public-Host). Routet Slack-DMs und @Mentions in den Omadia-Orchestrator."
   authors:
     - name: "byte5 GmbH"
@@ -59,6 +59,85 @@ lifecycle:
 # connection status (incl. a bad-token error) is surfaced in the admin UI.
 # ---------------------------------------------------------------------------
 setup:
+  guide:
+    en: |
+      ## Create a Slack app
+
+      You create a Slack app, grant bot scopes and choose **one** of two
+      transport modes. Takes about 10 minutes.
+
+      ### 1. Create the app
+      1. Open [api.slack.com/apps](https://api.slack.com/apps) → **Create New App** → **From scratch**.
+      2. Pick a name + workspace → **Create App**.
+
+      ### 2. Set bot scopes
+      Left sidebar → **OAuth & Permissions** → **Scopes** → **Bot Token Scopes** → add these:
+      `app_mentions:read`, `chat:write`, `reactions:write`, `im:history`,
+      `channels:history`, `groups:history`, `mpim:history`, `users:read`.
+
+      ### 3. Install & get the bot token
+      1. At the top, click **Install to Workspace** → **Allow**.
+      2. Copy the **Bot User OAuth Token** (starts with `xoxb-`) → paste below as **Bot User OAuth Token**.
+
+      ### 4. Choose a transport
+
+      **Option A — Events API (for production, public HTTPS host)**
+      1. **Basic Information** → **App Credentials** → copy the **Signing Secret** → field **Signing Secret**.
+      2. Set the **Public HTTPS Base-URL** field (e.g. `https://bot.example.com`).
+      3. Left sidebar → **Event Subscriptions** → **Enable** → **Request URL**:
+         `<your-base-url>/api/slack/events` (must be reachable, Slack verifies immediately).
+      4. **Subscribe to bot events**: `app_mention`, `message.im`, `message.channels`,
+         `message.groups`, `message.mpim` → **Save Changes**.
+
+      **Option B — Socket Mode (local / behind a firewall, no public host)**
+      1. Leave **Public HTTPS Base-URL** *empty*.
+      2. **Basic Information** → **App-Level Tokens** → **Generate Token** with scope
+         `connections:write` → copy → field **App-Level Token** (`xapp-…`).
+      3. Left sidebar → **Socket Mode** → **Enable**.
+      4. **Event Subscriptions** → subscribe to the same bot events as above (no Request URL needed).
+
+      ### 5. Invite the bot to channels
+      Run `/invite @YourBot` in each channel you want. DMs work without an
+      invite (if *Allow direct messages* is on).
+    de: |
+      ## Slack-App anlegen
+
+      Du legst eine Slack-App an, vergibst Bot-Scopes und wählst **einen** von zwei
+      Transport-Modi. Dauer ca. 10 Minuten.
+
+      ### 1. App erstellen
+      1. Öffne [api.slack.com/apps](https://api.slack.com/apps) → **Create New App** → **From scratch**.
+      2. Namen + Workspace wählen → **Create App**.
+
+      ### 2. Bot-Scopes setzen
+      Linke Leiste → **OAuth & Permissions** → **Scopes** → **Bot Token Scopes** → diese hinzufügen:
+      `app_mentions:read`, `chat:write`, `reactions:write`, `im:history`,
+      `channels:history`, `groups:history`, `mpim:history`, `users:read`.
+
+      ### 3. Installieren & Bot-Token holen
+      1. Oben auf **Install to Workspace** → **Allow**.
+      2. Kopiere den **Bot User OAuth Token** (beginnt mit `xoxb-`) → unten als **Bot User OAuth Token** eintragen.
+
+      ### 4. Transport wählen
+
+      **Variante A — Events API (für Produktion, öffentlicher HTTPS-Host)**
+      1. **Basic Information** → **App Credentials** → **Signing Secret** kopieren → Feld **Signing Secret**.
+      2. Feld **Public HTTPS Base-URL** setzen (z.B. `https://bot.example.com`).
+      3. Linke Leiste → **Event Subscriptions** → **Enable** → **Request URL**:
+         `<deine-base-url>/api/slack/events` (muss erreichbar sein, Slack verifiziert sofort).
+      4. **Subscribe to bot events**: `app_mention`, `message.im`, `message.channels`,
+         `message.groups`, `message.mpim` → **Save Changes**.
+
+      **Variante B — Socket Mode (lokal / hinter Firewall, kein Public-Host)**
+      1. **Public HTTPS Base-URL** *leer lassen*.
+      2. **Basic Information** → **App-Level Tokens** → **Generate Token** mit Scope
+         `connections:write` → kopieren → Feld **App-Level Token** (`xapp-…`).
+      3. Linke Leiste → **Socket Mode** → **Enable**.
+      4. **Event Subscriptions** → dieselben Bot-Events wie oben abonnieren (keine Request URL nötig).
+
+      ### 5. Bot in Channels einladen
+      In jedem gewünschten Channel `/invite @DeinBot` ausführen. DMs funktionieren
+      ohne Einladung (falls *Direktnachrichten zulassen* aktiv).
   fields:
     - key: "bot_token"
       type: "secret"
