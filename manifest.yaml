@@ -21,7 +21,7 @@ identity:
   kind: "channel"
   domain: "slack"
   name: "Slack"
-  version: "0.2.2"                         # === package.json "version"
+  version: "0.2.3"                         # === package.json "version"
   description: "Slack-Channel via Events API (Webhook, prod-empfohlen) oder Socket Mode (Fallback ohne Public-Host). Routet Slack-DMs und @Mentions in den Omadia-Orchestrator."
   authors:
     - name: "byte5 GmbH"
@@ -209,6 +209,27 @@ permissions:
       - "*.slack.com"
   filesystem:
     scratch: false
+
+# omadia#838 — declare every capability this channel resolves through
+# `ctx.services.get`, retiring the `@omadia/channel-slack` row in
+# `STANDALONE_LEGACY_SERVICE_GRANTS_2026_08_20`.
+#
+# `requires:` — `chatAgent@^1` is the orchestrator-published ChatAgentBundle
+# (`resolveChatAgent` throws "orchestrator unavailable" when absent), and
+# `@omadia/orchestrator` declares `provides: chatAgent@1`, so the capability
+# resolver resolves the edge and orders the orchestrator first.
+#
+# `optional_requires:` — `channelResolver@1` is the multi-orchestrator
+# per-turn router, published by the middleware kernel rather than a plugin
+# manifest, and its absence is survivable (every turn falls back to the
+# default chatAgent). A `requires:` entry would be permanently unresolved and
+# drop the channel from the eligible set; `optional_requires:` grants the same
+# declaration the service gate asks for without a resolver edge.
+requires:
+  - "chatAgent@^1"
+optional_requires:
+  - "channelResolver@1"
+provides: []
 
 # Generic admin-UI iframe surface (rendered by web-ui for any plugin that
 # declares admin_ui_path). This is where the operator sees connection status,
