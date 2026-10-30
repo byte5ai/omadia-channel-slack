@@ -73,7 +73,8 @@ setup:
       ### 2. Set bot scopes
       Left sidebar → **OAuth & Permissions** → **Scopes** → **Bot Token Scopes** → add these:
       `app_mentions:read`, `chat:write`, `reactions:write`, `im:history`,
-      `channels:history`, `groups:history`, `mpim:history`, `users:read`.
+      `channels:history`, `groups:history`, `mpim:history`, `users:read`
+      (optional: `users:read.email`, so the Conductor people picker can show and match e-mail addresses).
 
       ### 3. Install & get the bot token
       1. At the top, click **Install to Workspace** → **Allow**.
@@ -112,7 +113,8 @@ setup:
       ### 2. Bot-Scopes setzen
       Linke Leiste → **OAuth & Permissions** → **Scopes** → **Bot Token Scopes** → diese hinzufügen:
       `app_mentions:read`, `chat:write`, `reactions:write`, `im:history`,
-      `channels:history`, `groups:history`, `mpim:history`, `users:read`.
+      `channels:history`, `groups:history`, `mpim:history`, `users:read`
+      (optional: `users:read.email`, so the Conductor people picker can show and match e-mail addresses).
 
       ### 3. Installieren & Bot-Token holen
       1. Oben auf **Install to Workspace** → **Allow**.
@@ -142,7 +144,7 @@ setup:
     - key: "bot_token"
       type: "secret"
       label: "Bot User OAuth Token (xoxb-…)"
-      help: "OAuth & Permissions → Bot User OAuth Token. Benötigte Bot-Scopes: app_mentions:read, chat:write, reactions:write, im:history, channels:history, groups:history, mpim:history, users:read."
+      help: "OAuth & Permissions → Bot User OAuth Token. Benötigte Bot-Scopes: app_mentions:read, chat:write, reactions:write, im:history, channels:history, groups:history, mpim:history, users:read (optional users:read.email für die Personensuche)."
       required: true
 
     - key: "public_base_url"

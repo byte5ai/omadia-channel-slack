@@ -1,5 +1,6 @@
 import { LogLevel } from '@slack/logger';
 import { WebClient } from '@slack/web-api';
+import type { SlackDirectoryUser } from './slackPeopleDirectory.js';
 
 import type { IncomingTurn } from '@omadia/channel-sdk';
 
@@ -37,6 +38,13 @@ const ACK_EMOJI = 'eyes';
 /** Cap on the dedup set of handled message keys. */
 const HANDLED_KEYS_MAX = 1_000;
 
+/** `users.list` cache for the people directory: one workspace walk per TTL,
+ *  bounded so a huge workspace cannot pin memory; `truncated` tells the
+ *  kernel the directory is only partially known. */
+const USERS_CACHE_TTL_MS = 5 * 60 * 1000;
+const USERS_PAGE_SIZE = 200;
+const USERS_CACHE_MAX = 2_000;
+
 /**
  * Transport-agnostic Slack channel core. Owns the {@link WebClient} (outbound
  * Web API + identity), the inbound de-duplication + access policy, and the
@@ -48,6 +56,7 @@ const HANDLED_KEYS_MAX = 1_000;
 export class SlackChannel {
   private readonly web: WebClient;
   private botUserId = '';
+  private usersCache: { users: SlackDirectoryUser[]; truncated: boolean; fetchedAt: number } | undefined;
   /** `${channel}:${ts}` of messages already handled — Slack delivers a mention
    *  as BOTH an `app_mention` and a `message` event (and the Events API may
    *  retry), so we de-duplicate centrally. */
@@ -160,6 +169,55 @@ export class SlackChannel {
 
   /** Post a message. `threadTs` threads the reply (channel messages); omit for
    *  DMs to reply at the top level. */
+  /**
+   * People directory (Conductor human steps): workspace members matching
+   * `query` on handle / real name / display name / email, case-insensitive.
+   * Slack has no user search API, so this walks `users.list` (bot scope
+   * `users:read`, `users:read.email` for addresses) into a 5-minute cache and
+   * filters locally. Bots, deleted users and Slackbot are excluded. Throws the
+   * Web API error (with `data.error`) so the provider can map `missing_scope`
+   * to "not configured".
+   */
+  async searchUsers(query: string, limit: number): Promise<{ users: SlackDirectoryUser[]; truncated: boolean }> {
+    const needle = query.trim().toLowerCase();
+    const cache = await this.workspaceUsers();
+    const matches = cache.users.filter((u) =>
+      [u.name, u.realName, u.displayName, u.email].some((v) => v !== undefined && v.toLowerCase().includes(needle)),
+    );
+    const cap = Math.max(1, Math.floor(limit));
+    return { users: matches.slice(0, cap), truncated: cache.truncated || matches.length > cap };
+  }
+
+  private async workspaceUsers(): Promise<{ users: SlackDirectoryUser[]; truncated: boolean }> {
+    if (this.usersCache && Date.now() - this.usersCache.fetchedAt < USERS_CACHE_TTL_MS) return this.usersCache;
+    const users: SlackDirectoryUser[] = [];
+    let cursor: string | undefined;
+    let truncated = false;
+    do {
+      const page = await this.web.users.list({ limit: USERS_PAGE_SIZE, ...(cursor ? { cursor } : {}) });
+      for (const m of page.members ?? []) {
+        if (!m.id || m.deleted || m.is_bot || m.id === 'USLACKBOT') continue;
+        users.push({
+          id: m.id,
+          ...(m.name ? { name: m.name } : {}),
+          ...(m.real_name ? { realName: m.real_name } : {}),
+          ...(m.profile?.display_name ? { displayName: m.profile.display_name } : {}),
+          ...(m.profile?.email ? { email: m.profile.email } : {}),
+          ...(m.profile?.title ? { title: m.profile.title } : {}),
+        });
+      }
+      cursor = page.response_metadata?.next_cursor || undefined;
+      if (users.length >= USERS_CACHE_MAX) {
+        // Hard cap: drop the overflow of the last page too, and say so.
+        if (users.length > USERS_CACHE_MAX || cursor) truncated = true;
+        users.length = Math.min(users.length, USERS_CACHE_MAX);
+        cursor = undefined;
+      }
+    } while (cursor);
+    this.usersCache = { users, truncated, fetchedAt: Date.now() };
+    return this.usersCache;
+  }
+
   async sendText(channel: string, text: string, threadTs?: string): Promise<void> {
     await this.web.chat.postMessage({
       channel,
