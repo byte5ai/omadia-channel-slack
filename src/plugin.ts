@@ -17,6 +17,7 @@ import { createEventsApiRouter } from './eventsApiTransport.js';
 import type { SlackTurnMeta } from './inbound.js';
 import { renderAnswer } from './renderer.js';
 import { SlackChannel } from './slackChannel.js';
+import { createSlackPeopleDirectoryProvider } from './slackPeopleDirectory.js';
 import { SocketModeTransport } from './socketModeTransport.js';
 import { createChannelState, patchState } from './state.js';
 
@@ -77,6 +78,18 @@ export async function activate(ctx: PluginContext, core: CoreApi): Promise<Chann
     onMessage: (turn) => handleTurn(ctx, agent, core, channel, turn),
   });
 
+  // People directory (Conductor human steps resolve "Max Mustermann" → his Slack
+  // member id, which IS the channel binding key). Feature-detected: older kernels
+  // have no registry and the plugin behaves exactly as before. Registered LAST,
+  // after every fatal activation check — a provider must not outlive a failed
+  // activation (the kernel only unregisters on deactivate).
+  const registerPeopleDirectory = (): void => {
+    core.registerPeopleDirectoryProvider?.(
+      channelId,
+      createSlackPeopleDirectoryProvider({ channel, log: (m) => core.log('warn', m) }),
+    );
+  };
+
   // Status admin UI. web-ui renders this as an iframe (manifest
   // `admin_ui_path`); the UI fetches its JSON API with RELATIVE paths so it
   // resolves through the `/bot-api` rewrite.
@@ -131,6 +144,7 @@ export async function activate(ctx: PluginContext, core: CoreApi): Promise<Chann
       `Slack Events API ready — set this Request URL in your Slack app (Event Subscriptions): ${requestUrl ?? ''}`,
     );
 
+    registerPeopleDirectory();
     return { async close() { for (const d of disposers.reverse()) d(); } };
   }
 
@@ -154,6 +168,7 @@ export async function activate(ctx: PluginContext, core: CoreApi): Promise<Chann
     allowlisted: allowlist.size,
   });
 
+  registerPeopleDirectory();
   return { async close() { for (const d of disposers.reverse()) d(); } };
 }
 
