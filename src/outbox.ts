@@ -1,5 +1,6 @@
 import {
   InMemorySpeakerHistoryStore,
+  type AgentSpeaker,
   type SemanticAnswer,
   type Speaker,
   type SpeakerHistoryStore,
@@ -36,7 +37,7 @@ export interface DeliveryTarget {
   readonly followUp?: boolean;
 }
 
-const SYSTEM_SPEAKER: Speaker = Object.freeze({ kind: 'system' });
+export const SYSTEM_SPEAKER: Speaker = Object.freeze({ kind: 'system' });
 
 /** The plugin's own default locale for texts it has to write itself. */
 const DEFAULT_LOCALE = 'de';
@@ -88,12 +89,12 @@ export class SlackOutbox {
 
   /**
    * The pace acknowledgement (`runPacedTurn`, spec §5.8): the SDK's fixed
-   * "on it" template. The agent that will answer is not known before it does
-   * (the resolver hands out a ChatAgent, not its speaker), so the text goes out
-   * without a speaker; it is the only message of this channel that does.
+   * "on it" template, said under the agent that will answer (the resolver
+   * announces it before the answer). The speaker is required: there is no
+   * acknowledgement without somebody to say it.
    */
-  deliverAck(text: string, target: DeliveryTarget): Promise<boolean> {
-    return this.deliver({ text }, target);
+  deliverAck(text: string, speaker: AgentSpeaker, target: DeliveryTarget): Promise<boolean> {
+    return this.deliver({ text, speaker }, target);
   }
 
   /** Send a `system` notice. */
