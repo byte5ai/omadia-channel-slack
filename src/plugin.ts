@@ -7,19 +7,28 @@ import {
   type ChatAgent,
   type ChannelHandle,
   type CoreApi,
+  type LogLevel,
 } from '@omadia/channel-sdk';
-import type { PluginContext } from '@omadia/plugin-api';
+import type { PluginContext, RoutinesIntegration } from '@omadia/plugin-api';
 
 import { createAdminRouter } from './adminRouter.js';
-import { createEventsApiRouter } from './eventsApiTransport.js';
+import {
+  createSlackAgentIdentityProvider,
+  SlackAppFleet,
+  startStoredAgentApps,
+  type AgentAppDeps,
+  type SlackAgentApp,
+} from './agentApps.js';
+import { createAgentBotsEventsRouter, createEventsApiRouter } from './eventsApiTransport.js';
 import { SlackOutbox } from './outbox.js';
 import { SLACK_CHANNEL_TYPE } from './renderer.js';
-import { SlackChannel } from './slackChannel.js';
+import { SlackChannel, slackBotChannelKey } from './slackChannel.js';
 import { createSlackPeopleDirectoryProvider } from './slackPeopleDirectory.js';
 import { createSlackRosterProvider } from './slackRoster.js';
 import { createSlackSendProviders } from './slackSendProviders.js';
 import { SocketModeTransport } from './socketModeTransport.js';
 import { createChannelState, patchState } from './state.js';
+import { createSlackProactiveSend, createSlackRoutineTurn, ROUTINES_INTEGRATION_SERVICE } from './routines.js';
 import { handleSlackTurn, type TurnDeps } from './turn.js';
 
 const EVENTS_ROUTE_PREFIX = '/api/slack';
@@ -65,43 +74,73 @@ export async function activate(ctx: PluginContext, core: CoreApi): Promise<Chann
     );
   }
 
+  // Triggers and routines (spec 2042 §5.12): published by the kernel only
+  // with a database. Absent = agents cannot set triggers or routines here.
+  const routines = ctx.services.get<RoutinesIntegration>(ROUTINES_INTEGRATION_SERVICE);
+
   const state = createChannelState();
   state.mode = mode;
+  const log = (level: LogLevel, message: string, context?: Record<string, unknown>) =>
+    core.log(level, message, context);
 
-  // `let channel!` so the onMessage closure can reference the instance it is
-  // attached to; the closure only fires once messages arrive (long after
-  // construction), by which time `channel` is assigned. The outbox is the one
-  // emitter of everything this channel says to a user (see outbox.ts).
-  let channel!: SlackChannel;
-  let outbox!: SlackOutbox;
-  const turnDeps = (): TurnDeps => ({
-    route: (key, context) => resolveChannelRoute(ctx, SLACK_CHANNEL_TYPE, key, context),
-    defaultAgent: agent,
-    outbox,
-    log: (level, message, context) => core.log(level, message, context),
-  });
-  channel = new SlackChannel({
-    channelId,
+  /**
+   * One Slack app: the installation's own app, or an agent's own app (spec
+   * 2042 §5.3). An agent app resolves every turn on its own key and answers
+   * only as the agent whose identity it is; its answers carry no name line.
+   * The outbox is the one emitter of everything an app says (see outbox.ts).
+   */
+  const buildApp = (appBotToken: string, agentBot: boolean, appState = state) => {
+    // `let channel!` so the onMessage closure can reference the instance it is
+    // attached to; the closure only fires once messages arrive.
+    let channel!: SlackChannel;
+    let outbox!: SlackOutbox;
+    const turnDeps = (): TurnDeps => ({
+      route: (key, context) => resolveChannelRoute(ctx, SLACK_CHANNEL_TYPE, key, context),
+      defaultAgent: agent,
+      outbox,
+      log,
+      ...(agentBot ? { ownBotKey: () => channel.channelKey() } : {}),
+      // A trigger or routine the agent sets here delivers through this app.
+      ...(routines
+        ? { routineTurn: createSlackRoutineTurn(routines, channelId, () => (agentBot ? channel.channelKey() : undefined)) }
+        : {}),
+    });
+    channel = new SlackChannel({
+      channelId,
+      botToken: appBotToken,
+      log,
+      state: appState,
+      // An agent's app answers when addressed (mention, DM); "every message"
+      // is the kernel's to hand out, or N agents would answer one message.
+      policy: { respondInChannels: agentBot ? 'mention' : respondInChannels, allowDms, allowlist },
+      onMessage: (turn) => handleSlackTurn(turnDeps(), turn),
+      // Message record for the kernel (typed answers to a poll). Feature-detected.
+      ...(core.emitConversationMessage
+        ? { emitMessage: (event) => core.emitConversationMessage?.(event) }
+        : {}),
+      ...(core.reportConversationMessage
+        ? { reportMessage: (event) => core.reportConversationMessage?.(event) ?? Promise.resolve({ answeredCard: false }) }
+        : {}),
+      ...(core.conversationDelivery
+        ? {
+            deliveryOf: (conversationId, channelKey) =>
+              core.conversationDelivery?.(SLACK_CHANNEL_TYPE, conversationId, channelKey) ?? 'none',
+          }
+        : {}),
+    });
+    outbox = new SlackOutbox(channel, undefined, agentBot);
+    const roster = createSlackRosterProvider({ channel, log: (m) => core.log('warn', m) });
+    return { channel, outbox, roster, send: { outbox, users: channel } };
+  };
+
+  const own = buildApp(botToken, false);
+  const channel = own.channel;
+  const fleet = new SlackAppFleet({
+    channelKey: () => channel.channelKey(),
+    send: own.send,
+    roster: own.roster,
     botToken,
-    log: (level, message, context) => core.log(level, message, context),
-    state,
-    policy: { respondInChannels, allowDms, allowlist },
-    onMessage: (turn) => handleSlackTurn(turnDeps(), turn),
-    // Message record for the kernel (typed answers to a poll). Feature-detected.
-    ...(core.emitConversationMessage
-      ? { emitMessage: (event) => core.emitConversationMessage?.(event) }
-      : {}),
-    ...(core.reportConversationMessage
-      ? { reportMessage: (event) => core.reportConversationMessage?.(event) ?? Promise.resolve({ answeredCard: false }) }
-      : {}),
-    ...(core.conversationDelivery
-      ? {
-          deliveryOf: (conversationId, channelKey) =>
-            core.conversationDelivery?.(SLACK_CHANNEL_TYPE, conversationId, channelKey) ?? 'none',
-        }
-      : {}),
   });
-  outbox = new SlackOutbox(channel);
 
   // People directory (Conductor human steps resolve "Max Mustermann" → his Slack
   // member id, which IS the channel binding key). Feature-detected: older kernels
@@ -115,23 +154,24 @@ export async function activate(ctx: PluginContext, core: CoreApi): Promise<Chann
     );
   };
 
-  // Conversation roster (members of a channel / group DM). The kernel's audience
-  // floor reads it before an agent answers in a group; without it a group gets
-  // no answer. Feature-detected like the people directory, same ordering rule.
+  // Conversation roster (members of a channel / group DM) as the app
+  // `asChannelKey` sees it. The kernel's audience floor reads it before an
+  // agent answers in a group; without it a group gets no answer.
   const registerRoster = (): void => {
-    core.registerRosterProvider?.(
-      channelId,
-      createSlackRosterProvider({ channel, log: (m) => core.log('warn', m) }),
-    );
+    core.registerRosterProvider?.(channelId, fleet.rosterProvider());
   };
 
-  // Proactive sends (Conductor DMs, posts into a conversation). Feature-detected
-  // like the providers above, registered at the same point. One Slack app is one
-  // identity, so these deliver `system` messages only (no `asChannelKey`).
+  // Proactive sends (Conductor DMs, posts into a conversation) through exactly
+  // the app `asChannelKey` names; no key: the installation's own app.
   const registerSendProviders = (): void => {
-    const { targeted, conversation } = createSlackSendProviders({ outbox, users: channel });
+    const { targeted, conversation } = createSlackSendProviders((key) => fleet.sendFor(key));
     core.registerTargetedSendProvider?.(channelId, targeted);
     core.registerConversationSendProvider?.(channelId, conversation);
+    // Trigger and routine deliveries go out through the app the conversation
+    // came through: an agent's own app, or the installation's.
+    // Removed again on close, so nothing is delivered through a closed channel.
+    const dispose = routines?.publishProactiveSend(SLACK_CHANNEL_TYPE, createSlackProactiveSend((key) => fleet.sendFor(key)));
+    if (typeof dispose === 'function') disposers.push(dispose);
   };
 
   // Status admin UI. web-ui renders this as an iframe (manifest
@@ -156,6 +196,79 @@ export async function activate(ctx: PluginContext, core: CoreApi): Promise<Chann
     ),
   );
 
+  // --- Agents' own apps (spec 2042 §5.3) --------------------------------
+  // The same transport as the channel's own app. Needs the vault write
+  // permission and a kernel that takes agent identities; without either,
+  // agents keep `/agent`.
+  const agentApps = async (): Promise<void> => {
+    const secrets = ctx.secrets;
+    if (!secrets.set || !secrets.delete) return;
+    const appDeps: AgentAppDeps = {
+      fleet,
+      mode,
+      secrets: {
+        get: (key) => secrets.get(key),
+        keys: () => secrets.keys(),
+        set: (key, value) => secrets.set!(key, value),
+        delete: (key) => secrets.delete!(key),
+      },
+      startAgentApp: async (credentials, identity) => {
+        const appState = createChannelState();
+        appState.mode = mode;
+        const app = buildApp(credentials.bot_token, true, appState);
+        await app.channel.init();
+        const botKey = slackBotChannelKey(identity.botUserId);
+        // Each app closes its OWN connection (the fleet closes a replaced app).
+        let closeTransport = (): void => undefined;
+        if (mode === 'socket' && credentials.app_token) {
+          const transport = new SocketModeTransport({ appToken: credentials.app_token, channel: app.channel, log: core.log.bind(core), state: appState });
+          transport.start();
+          closeTransport = () => void transport.close();
+        } else {
+          patchState(appState, { status: 'connected' });
+        }
+        return {
+          botKey,
+          botUserId: identity.botUserId,
+          name: identity.name,
+          send: app.send,
+          roster: app.roster,
+          signingSecret: credentials.signing_secret ?? '',
+          channel: app.channel,
+          state: appState,
+          isMemberOf: (conversationId) => app.channel.isMemberOf(conversationId),
+          status: () => (appState.status === 'connected' ? 'connected' : appState.status === 'error' ? 'error' : 'connecting'),
+          close: async () => {
+            closeTransport();
+          },
+        } satisfies SlackAgentAppRuntime;
+      },
+      log: (level, message) => core.log(level, message),
+    };
+    if (mode === 'webhook') {
+      disposers.push(
+        ctx.routes.register(
+          `${EVENTS_ROUTE_PREFIX}/agent-bots`,
+          createAgentBotsEventsRouter((member) => {
+            const app = fleet.agentAppByMember(member) as SlackAgentAppRuntime | undefined;
+            return app ? { signingSecret: app.signingSecret, channel: app.channel, log: core.log.bind(core), state: app.state } : undefined;
+          }),
+        ),
+      );
+    }
+    disposers.push(() => void fleet.closeAll());
+    // In the background: Slack's token checks can exceed the activate budget.
+    void startStoredAgentApps(appDeps).catch((err: unknown) =>
+      core.log('warn', `slack agent apps could not be started: ${err instanceof Error ? err.message : String(err)}`),
+    );
+    if (typeof core.registerAgentIdentityProvider === 'function') {
+      core.registerAgentIdentityProvider(channelId, createSlackAgentIdentityProvider(appDeps));
+      core.log('info', 'slack agent apps: identity provider registered (one app per agent)');
+    } else {
+      core.log('info', 'kernel takes no agent identities — agents are reached through the shared app only');
+    }
+  };
+
   if (mode === 'webhook') {
     const signingSecret = await ctx.secrets.get('signing_secret');
     if (!signingSecret) {
@@ -164,6 +277,8 @@ export async function activate(ctx: PluginContext, core: CoreApi): Promise<Chann
       );
     }
 
+    // Agents' apps first: the more specific prefix.
+    await agentApps();
     disposers.push(
       ctx.routes.register(
         EVENTS_ROUTE_PREFIX,
@@ -206,6 +321,7 @@ export async function activate(ctx: PluginContext, core: CoreApi): Promise<Chann
   onReconnect = () => transport.reconnect();
   transport.start();
   disposers.push(() => void transport.close());
+  await agentApps();
 
   core.log('info', 'Slack channel activated in Socket Mode', {
     adminUi: '/api/slack-channel/admin/index.html',
@@ -218,6 +334,13 @@ export async function activate(ctx: PluginContext, core: CoreApi): Promise<Chann
   registerRoster();
   registerSendProviders();
   return { async close() { for (const d of disposers.reverse()) d(); } };
+}
+
+/** An agent app with what its webhook needs. */
+interface SlackAgentAppRuntime extends SlackAgentApp {
+  readonly signingSecret: string;
+  readonly channel: SlackChannel;
+  readonly state: ReturnType<typeof createChannelState>;
 }
 
 /** Validate the bot token + resolve identity for webhook mode, mapping the

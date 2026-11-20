@@ -22,6 +22,7 @@ import {
 
 import type { SlackMessageEvent, SlackTurnMeta } from './inbound.js';
 import type { DeliveryTarget, SlackOutbox } from './outbox.js';
+import type { SlackRoutineTurn } from './routines.js';
 import { SLACK_CHANNEL_TYPE } from './renderer.js';
 
 /**
@@ -38,6 +39,8 @@ export type AgentResolution =
       readonly agent: ChatAgent;
       /** The agent that will answer, known before the answer (the pace acknowledgement speaks as it). */
       readonly speaker?: AgentSpeaker;
+      /** The key IS this agent's own bot (spec 2042 §5.3). */
+      readonly exclusive?: boolean;
     }
   | {
       /**
@@ -48,6 +51,8 @@ export type AgentResolution =
       readonly kind: 'refused';
       readonly agent?: ChatAgent;
       readonly notice?: SystemNotice;
+      /** The refusal is about the agent whose own bot this key is. */
+      readonly exclusive?: boolean;
     };
 
 /** Who is asking and in which language the kernel writes its notices. */
@@ -96,7 +101,12 @@ export function resolveAgentForTurn(
     if (result.decision === 'bound' && result.chatAgent) {
       // A command belongs to the narrowest key: its selection is stored there.
       if (rejection?.agent && parseAgentCommand(text)) return { kind: 'refused', ...rejection };
-      return { kind: 'agent', agent: result.chatAgent, ...(result.speaker ? { speaker: result.speaker } : {}) };
+      return {
+        kind: 'agent',
+        agent: result.chatAgent,
+        ...(result.speaker ? { speaker: result.speaker } : {}),
+        ...(result.exclusive === true ? { exclusive: true } : {}),
+      };
     }
     rejection ??= rejectionOf(result);
   }
@@ -104,10 +114,11 @@ export function resolveAgentForTurn(
   return { kind: 'refused', ...(rejection ?? {}) };
 }
 
-function rejectionOf(result: ChannelResolveResult): { agent?: ChatAgent; notice?: SystemNotice } {
+function rejectionOf(result: ChannelResolveResult): { agent?: ChatAgent; notice?: SystemNotice; exclusive?: boolean } {
   return {
     ...(result.chatAgent ? { agent: result.chatAgent } : {}),
     ...(result.notice ? { notice: result.notice } : {}),
+    ...(result.exclusive === true ? { exclusive: true } : {}),
   };
 }
 
@@ -155,6 +166,20 @@ export interface TurnDeps {
   /** Timer seam for the pace tests; the real clock when absent. */
   readonly clock?: PaceClock;
   readonly log: (level: 'info' | 'warn' | 'error', message: string, context?: Record<string, unknown>) => void;
+  /**
+   * Spec 2042 §5.3 — set for an agent's own Slack app: its key
+   * `slack-bot:<bot member id>` (undefined until the token was checked).
+   * Every turn is resolved on that key alone, and only an EXCLUSIVE answer
+   * (the key IS the agent's identity) may answer: an app named after one
+   * agent never answers as another.
+   */
+  readonly ownBotKey?: () => string | undefined;
+  /**
+   * Spec 2042 §5.12 — opens the kernel's routines scope for a person's turn,
+   * so the agent may set triggers and routines that deliver back here
+   * (through this app). Absent = the kernel publishes no routines.
+   */
+  readonly routineTurn?: SlackRoutineTurn;
 }
 
 /**
@@ -179,6 +204,8 @@ const PACE_LOCALE = 'de';
 
 const TURN_FAILED_TEXT = 'Dabei ist ein Fehler aufgetreten. Bitte versuche es erneut.';
 const NO_AGENT_TEXT = 'Für diese Unterhaltung ist kein Agent eingerichtet.';
+/** An agent's own app the kernel does not know (any more) as that agent's identity. */
+const UNOWNED_BOT_TEXT = 'Dieser Bot ist gerade keinem Agenten zugeordnet und antwortet deshalb nicht.';
 
 /**
  * Drive one agent turn and ship the result back to Slack. The text of the turn
@@ -209,13 +236,21 @@ export async function handleSlackTurn(deps: TurnDeps, turn: IncomingTurn): Promi
   };
   const origin = slackTurnOrigin(turn, meta);
   try {
+    const ownBotKey = deps.ownBotKey ? deps.ownBotKey() ?? '' : undefined;
     const resolution = resolveAgentForTurn(
       deps.route,
-      [turn.conversationId, meta.teamId],
+      ownBotKey !== undefined ? [ownBotKey] : [turn.conversationId, meta.teamId],
       deps.defaultAgent,
       { principal: slackSenderPrincipal(turn), ...(meta.locale ? { locale: meta.locale } : {}) },
       turn.text,
     );
+    if (ownBotKey !== undefined && resolution.exclusive !== true) {
+      // The kernel does not know this app as an agent's identity (removed, or
+      // not registered yet): its name belongs to an agent, so nobody else answers.
+      deps.log('warn', "Slack agent app is no agent's identity; turn refused", { botKey: ownBotKey });
+      await deps.outbox.deliverSystem('no_agent', UNOWNED_BOT_TEXT, target);
+      return;
+    }
     const refusal = resolution.kind === 'refused' ? resolution : undefined;
     const agent = resolution.agent;
     if (!agent) {
@@ -224,14 +259,23 @@ export async function handleSlackTurn(deps: TurnDeps, turn: IncomingTurn): Promi
       return;
     }
     const speaker = resolution.kind === 'agent' ? resolution.speaker : undefined;
+    const chat = () =>
+      agent.chat({
+        userMessage: turn.text,
+        sessionScope: meta.sessionScope,
+        userId: turn.userRef.id,
+        origin,
+      });
+    // The routines scope wraps the whole turn: who asks, and where a trigger
+    // or routine the agent sets now delivers later.
+    const scoped = deps.routineTurn?.({
+      userId: turn.userRef.id,
+      conversationId: turn.conversationId,
+      conversationKey: meta.sessionScope,
+      ...(meta.threadTs ? { threadTs: meta.threadTs } : {}),
+    });
     const paced = await runPacedTurn(
-      () =>
-        agent.chat({
-          userMessage: turn.text,
-          sessionScope: meta.sessionScope,
-          userId: turn.userRef.id,
-          origin,
-        }),
+      () => (scoped ? scoped(chat) : chat()),
       slackPaceProfile(meta),
       {
         sendAck: async (text) => {

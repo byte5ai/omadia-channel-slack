@@ -24,14 +24,26 @@ export interface SlackUserLookup {
 }
 
 /**
- * Capabilities Slack declares. One Slack app is ONE identity, so the plugin
- * cannot post "as" a given agent (`asChannelKey` is not declared and a send
- * that asks for it is refused); no polls or cards (the sender falls back to a
- * chat ballot, which is plain text); `@mentions` become Slack member mentions.
- * Without `asChannelKey` the kernel sends nothing as an agent's own identity
- * through these providers, so every message they deliver is a `system` one.
+ * Capabilities Slack declares: `asChannelKey` (the post goes out through
+ * exactly the Slack app that key names, `slack-bot:<member id>`: the
+ * installation's own app or an agent's own app, spec 2042 §5.3; an unknown
+ * key is refused, never answered through another app); no polls or cards (the
+ * sender falls back to a chat ballot, which is plain text); `@mentions` become
+ * Slack member mentions.
  */
-export const SLACK_SEND_CAPABILITIES: SendProviderCapabilities = Object.freeze({ mentions: true });
+export const SLACK_SEND_CAPABILITIES: SendProviderCapabilities = Object.freeze({ mentions: true, asChannelKey: true });
+
+/** One Slack app the providers can post as. */
+export interface SlackSendBot {
+  readonly outbox: SlackOutbox;
+  readonly users: SlackUserLookup;
+}
+
+/**
+ * The app a send goes out as: `undefined` = the installation's own app, else
+ * the app with exactly that key. `undefined` back = no such app runs here.
+ */
+export type SlackBotLookup = (asChannelKey: string | undefined) => SlackSendBot | undefined;
 
 export interface SlackSendProviders {
   readonly targeted: TargetedSendProvider;
@@ -104,16 +116,19 @@ async function memberFor(
 
 /**
  * Proactive sends for the kernel (Conductor reminders and approvals, a routine's
- * report): a direct message to one member and a post into a conversation.
- * Everything leaves through the {@link SlackOutbox} (the one emitter), as a
- * `system` message: the plugin has no identity of its own per agent to speak as.
- * Unreachability is RETURNED, never thrown, as the provider contracts require.
+ * report, an agent's post): a direct message to one member and a post into a
+ * conversation, through the app `asChannelKey` names. Everything leaves through
+ * that app's {@link SlackOutbox} (the one emitter), as the text the kernel
+ * made, with no name line. Unreachability is RETURNED, never thrown, as the
+ * provider contracts require.
  */
-export function createSlackSendProviders(opts: {
-  readonly outbox: SlackOutbox;
-  readonly users: SlackUserLookup;
-}): SlackSendProviders {
-  const post = async (conversationId: string, message: TargetedMessage): Promise<TargetedDeliveryOutcome> => {
+export function createSlackSendProviders(lookup: SlackBotLookup): SlackSendProviders {
+  const botFor = (asChannelKey: string | undefined): SlackSendBot | Unreachable =>
+    lookup(asChannelKey === undefined ? undefined : asChannelKey.trim().toLowerCase()) ??
+    unreachable('not_permitted', `no Slack app '${String(asChannelKey)}' runs in this installation; nothing was posted`);
+  const isBot = (value: SlackSendBot | Unreachable): value is SlackSendBot => 'outbox' in value;
+
+  const post = async (opts: SlackSendBot, conversationId: string, message: TargetedMessage): Promise<TargetedDeliveryOutcome> => {
     const refused = refusedStructure(message);
     if (refused) return refused;
     const text = proactiveText(message);
@@ -134,10 +149,11 @@ export function createSlackSendProviders(opts: {
     channelType: SLACK_CHANNEL_TYPE,
     supports: SLACK_SEND_CAPABILITIES,
     async sendToUser(target, message, sendOpts) {
-      if (sendOpts?.asChannelKey) return unreachable('not_permitted', 'Slack has no identity per agent to send as');
-      const member = await memberFor(target, opts.users);
+      const bot = botFor(sendOpts?.asChannelKey);
+      if (!isBot(bot)) return bot;
+      const member = await memberFor(target, bot.users);
       // A DM is `chat.postMessage` to the member id: Slack opens the app's conversation with them.
-      return typeof member === 'string' ? post(member, message) : member;
+      return typeof member === 'string' ? post(bot, member, message) : member;
     },
   };
 
@@ -145,10 +161,9 @@ export function createSlackSendProviders(opts: {
     channelType: SLACK_CHANNEL_TYPE,
     supports: SLACK_SEND_CAPABILITIES,
     sendToConversation(conversationId: string, message: TargetedMessage, sendOpts?: ConversationSendOptions) {
-      if (sendOpts?.asChannelKey) {
-        return Promise.resolve(unreachable('not_permitted', 'Slack has no identity per agent to send as'));
-      }
-      return post(conversationId, message);
+      const bot = botFor(sendOpts?.asChannelKey);
+      if (!isBot(bot)) return Promise.resolve(bot);
+      return post(bot, conversationId, message);
     },
   };
 

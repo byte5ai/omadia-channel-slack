@@ -1,5 +1,40 @@
 # Changelog
 
+## 0.4.0
+
+An agent's own Slack app (byte5ai/omadia#2042, spec §5.3, §8 item 20). Needs
+a kernel with `registerAgentIdentityProvider` (S7); on an older kernel the
+plugin runs its own app only, as before.
+
+- **One app per agent** next to the installation's own app: the plugin
+  registers an `AgentIdentityProvider` (fields: bot token, plus the signing
+  secret for the Events API or an app-level token for Socket Mode, matching
+  the channel's transport). The bot token is checked with `auth.test`, the
+  credentials are stored in the plugin vault as `agent_app_<member id>`, and
+  the app starts (Events API at `/api/slack/agent-bots/<member id>/events`
+  with its own signing secret, or its own Socket Mode connection). Boot
+  restarts every stored app; removal stops it and deletes the credentials.
+  New permission `secrets.runtime_write`.
+- **Bot key `slack-bot:<member id>` is lowercase** (routing keys are compared
+  lowercase).
+- **An agent app resolves on its own key** and answers only when the kernel
+  reports the key as that agent's identity (`exclusive`); otherwise a system
+  notice, never another agent. No name line.
+- **Sends and rosters per app**: the providers declare `asChannelKey` and post
+  through exactly the app named (unknown key: unreachable); `presentIn` tells
+  the kernel which agent apps are members of a conversation.
+- **Triggers and routines deliver through the app they were set on** (spec
+  2042 §5.12): every turn opens the kernel's routines scope
+  (`routinesIntegration@1`, optional) with a delivery ref naming the conversation and,
+  on an agent's own app, that app (`asChannelKey`); the proactive send posts
+  through exactly that app (no name line on an agent's app, named like an
+  answer on the installation's). An app that no longer runs here is an error.
+  These turns never become a person's Conductor reminder target
+  (`conductorBinding: false`), and the proactive send is removed when the
+  channel closes.
+- **`compat.core` `>=1.79.0 <2.0`**: needs the kernel with agent channel
+  identities (plugin-api 1.79.0, S7).
+
 ## 0.3.0
 
 Agents as colleagues in Slack (omadia#2042, issue #5). Needs kernel

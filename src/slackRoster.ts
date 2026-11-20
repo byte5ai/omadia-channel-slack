@@ -87,8 +87,8 @@ function failureDetail(channelId: string, code: string | undefined): string {
  * The member list holds ids only, so `isBot` is stated for the bot itself
  * (`self`) and left open for everyone else: another app in the channel is
  * counted as a participant, the safe direction for an audience check.
- * One bot identity per installation, so `asChannelKey` has no second identity
- * to select and is ignored.
+ * One provider per app: the plugin picks the app `asChannelKey` names before
+ * it gets here (`SlackAppFleet.rosterProvider`).
  */
 export function createSlackRosterProvider(deps: SlackRosterDeps): ConversationRosterProvider {
   const now = deps.now ?? Date.now;

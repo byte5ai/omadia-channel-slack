@@ -56,9 +56,10 @@ export function systemAnswer(code: SystemNotice['code'], text: string, locale = 
  * counts the code paths that can reach {@link SlackSink} and fails when a
  * second one appears.
  *
- * Slack has one identity per installation (one bot token), so
- * `nativeIdentity` is false and the SDK adds a name line where several agents
- * speak. The speaker history is process-local: after a restart the first
+ * The installation's own app is shared, so its outbox has `nativeIdentity`
+ * false and the SDK adds a name line where several agents speak. An agent's
+ * own app (spec 2042 §5.3) IS that agent: its outbox has `nativeIdentity`
+ * true and never adds one. The speaker history is process-local: after a restart the first
  * answer of a one-agent conversation again gets no name line, and a
  * multi-agent conversation is recognised again from its second speaker on.
  */
