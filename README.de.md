@@ -44,7 +44,7 @@ Ein Channel-Plugin (`kind: channel`). Der omadia-Kernel aktiviert es aus der `ma
 **Ansprechen.** Dieses Plugin betreibt **eine Slack-App pro Installation**: ein Bot-Token, ein Bot-Name, ein Avatar. Der Sprecher zeigt sich deshalb nicht über die Plattform, und mehrere Agenten im selben Slack erreichst du mit dem nativen Befehl **`/agent`**:
 
 - `/agent Mira` wählt Mira für dich in dieser Unterhaltung, `/agent` hebt deine Auswahl auf, `/agents` listet die Agenten, die dir hier zur Verfügung stehen.
-- Das Plugin leitet nur den Text weiter. Der omadia-Kernel speichert die Auswahl pro Person und Unterhaltung, prüft die Verfügbarkeit und antwortet mit einer kurzen System-Meldung, die nur du siehst (ephemere Nachricht).
+- Das Plugin leitet nur den Text weiter (der Resolver des Kernels übergibt den Turn an einen Chat-Agenten, der `/agent`, `/agent Mira` und `/agents` selbst ausführt). Der omadia-Kernel speichert die Auswahl pro Person und Unterhaltung, prüft die Verfügbarkeit und antwortet mit einer kurzen System-Meldung, die nur du siehst (ephemere Nachricht).
 - Slack erlaubt keine Slash-Commands in Threads. Schreibe dort `@DeinBot /agent Mira`, das wird genauso behandelt.
 - Lege den Befehl in deiner Slack-App an (**Slash Commands**): `/agent`, Request URL `<public_base_url>/api/slack/commands` (Events API) oder keine URL (Socket Mode). Siehe die Setup-Anleitung.
 
@@ -57,7 +57,13 @@ Ein Channel-Plugin (`kind: channel`). Der omadia-Kernel aktiviert es aus der `ma
 - Meldungen des Systems (zum Beispiel „dieser Agent ist für dich nicht verfügbar") sind eigener Klartext, nie unter dem Namen eines Agenten.
 - Auswahlfragen werden zu einer nummerierten Liste im Text.
 - Die KI-Kennzeichnung ist Teil des Antworttextes und folgt der Häufigkeits-Einstellung des Betreibers.
-- Es gibt **keine Empfangsbestätigung per Reaktion** mehr (das frühere Augen-Emoji) und keinen Tipp-Indikator: Slack bietet einem Bot außerhalb der KI-Assistenten-Oberfläche keinen. Bei langer Arbeit bestätigt der Agent nach 8 Sekunden einmal („ich kümmere mich darum") und antwortet dann. Ein Slash-Command, der seine 30-Minuten-`response_url` überlebt, wird als ephemere Folgenachricht beantwortet.
+- Es gibt **keine Empfangsbestätigung per Reaktion** mehr (das frühere Augen-Emoji) und keinen Tipp-Indikator: Slack bietet einem Bot außerhalb der KI-Assistenten-Oberfläche keinen. Bei langer Arbeit bestätigt der Agent nach 8 Sekunden einmal („ich kümmere mich darum", unter seinem Namen, wie ihn der Kernel vorab nennt) und antwortet dann. Ein Slash-Command, der seine 30-Minuten-`response_url` überlebt, wird als ephemere Folgenachricht beantwortet.
+
+**Wer fragt.** Der Kernel erfährt den Absender als Principal in der einen Form, die alle Kanäle nutzen: `user:slack-user:<Member-ID, klein>` (Slack-Nachrichten tragen keine verifizierte E-Mail, die E-Mail-Form `user:<E-Mail>` kommt hier nicht vor). Auswahl und Verfügbarkeit hängen daran.
+
+**Absagen.** Antwortet kein Agent auf einen Turn (deaktiviert, gelöscht, für dich nicht verfügbar, niemand angesprochen), bekommst du die `system`-Meldung des Kernels, nie die Antwort eines anderen Agenten. `/agent` funktioniert dann trotzdem, du kannst also einen Agenten wählen. Eine Antwort ohne Sprecher wird zurückgehalten und durch eine kurze System-Meldung ersetzt (fail-closed).
+
+**Proaktive Nachrichten.** Das Plugin meldet dem Kernel einen Direktnachrichten- und einen Konversations-Sende-Provider an (Erinnerungen, Freigaben, Berichte). Sie liefern `system`-Nachrichten über denselben einen Outbox-Weg, können Slack-Mitglieder @erwähnen und nicht „als" ein bestimmter Agent posten (eine Slack-App ist eine Identität). Eine Umfrage oder Fragekarte wird abgelehnt, der Absender fällt dann auf einen Klartext-Stimmzettel zurück: eine nummerierte Frage, die du mit der Nummer beantwortest.
 
 **Gruppen.** Der Bot liest, wer in einem Channel oder Gruppenchat ist (`conversations.members`), und gibt dem Kernel eine ehrliche Teilnehmerliste (vollständig, teilweise oder unbekannt). Die Zielgruppen-Prüfung des Kernels braucht sie: ohne Liste antwortet ein Agent in einer Gruppe nicht. Ergänze die Bot-Scopes `channels:read`, `groups:read`, `im:read` und `mpim:read`. Ein fehlender Scope erscheint im Log als „Liste unbekannt", nicht als Raten.
 

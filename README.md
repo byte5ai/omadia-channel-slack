@@ -44,7 +44,7 @@ A channel plugin (`kind: channel`). The omadia kernel activates it from `manifes
 **Addressing.** This plugin runs **one Slack app per installation**: one bot token, one bot name and avatar. So the speaker is not shown through the platform, and several agents in the same Slack are reached with the native **`/agent`** command:
 
 - `/agent Mira` selects Mira for you in this conversation, `/agent` clears your selection, `/agents` lists the agents available to you here.
-- The plugin only forwards the text. The omadia kernel stores the selection per user and conversation, checks availability and answers with a short system notice that only you see (an ephemeral message).
+- The plugin only forwards the text (the kernel's resolver hands the turn to a chat agent that carries `/agent`, `/agent Mira` and `/agents` out itself). The omadia kernel stores the selection per user and conversation, checks availability and answers with a short system notice that only you see (an ephemeral message).
 - Slack does not allow slash commands inside threads. Write `@YourBot /agent Mira` there, it is handled the same way.
 - Create the command in your Slack app (**Slash Commands**): `/agent`, Request URL `<public_base_url>/api/slack/commands` (Events API) or no URL (Socket Mode). See the setup guide.
 
@@ -57,7 +57,13 @@ A channel plugin (`kind: channel`). The omadia kernel activates it from `manifes
 - Messages from the system (for example "this agent is not available to you") are plain text of their own, never under an agent's name.
 - Choices become a numbered list in the text.
 - The AI disclosure line is part of the answer text and follows the operator's frequency setting.
-- There is **no receipt reaction** any more (the former eyes emoji) and no typing indicator: Slack offers none to a bot outside its AI-assistant surface. For long work the agent acknowledges once ("on it") after 8 seconds, then answers. A slash command that outlives its 30-minute `response_url` is answered as an ephemeral follow-up.
+- There is **no receipt reaction** any more (the former eyes emoji) and no typing indicator: Slack offers none to a bot outside its AI-assistant surface. For long work the agent acknowledges once ("on it", under its own name, as announced by the kernel) after 8 seconds, then answers. A slash command that outlives its 30-minute `response_url` is answered as an ephemeral follow-up.
+
+**Who is asking.** The kernel is told who sends a message as a principal in the one form every channel uses: `user:slack-user:<member id, lowercase>` (Slack message events carry no verified e-mail, so the e-mail form `user:<e-mail>` does not occur). Selections and availability are keyed by it.
+
+**Refusals.** If no agent answers a turn (disabled, deleted, not available to you, nothing addressed), you get the kernel's `system` notice, never an answer from another agent. `/agent` still works then, so you can pick an agent. An answer without a speaker is withheld and replaced by a short system notice (fail-closed).
+
+**Proactive messages.** The plugin registers a direct-message and a conversation send provider for the kernel (reminders, approvals, reports). They deliver `system` messages through the same single outbox, can @mention Slack members and cannot post "as" a given agent (one Slack app is one identity). A poll or question card is refused so the sender falls back to a plain-text ballot: a numbered question you answer by typing the number.
 
 **Groups.** The bot reads who is in a channel or group chat (`conversations.members`) and gives the kernel an honest roster (complete, partial or unknown). The kernel's audience check needs it: without the roster an agent does not answer in a group. Add the bot scopes `channels:read`, `groups:read`, `im:read` and `mpim:read`. A missing scope shows up as "roster unknown" in the log, not as a guess.
 

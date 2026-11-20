@@ -24,11 +24,29 @@ omadia#2045 / #2086 / #2087 (S6 branch): do not publish before the kernel is liv
   ephemeral through `response_url`. DM policy and allowlist still apply.
   Create the command in the Slack app (setup guide step 5).
 - **Turn origin and routing context**: `ChatTurnInput.origin` (channel type,
-  principal `user:<member id>`, direct/group, channel id, message id) and
-  `IncomingTurn.conversationType`. `channelResolver@1.resolve` gets the
-  principal as optional third argument. **Behaviour change:** a `reject` from
-  the resolver is now answered with the kernel's `system` notice (or a short
-  "no agent set up" text) and never by the default agent (INV-7, #1598).
+  principal, direct/group, channel id, message id) and
+  `IncomingTurn.conversationType`. `channelResolver@1.resolve` gets
+  `{ principal, locale }`. **Behaviour change:** a `reject` from the resolver
+  is now answered with the kernel's `system` notice (or a short "no agent set
+  up" text) and never by the default agent (INV-7, #1598).
+- **S1 resolver contract** (kernel `135a14dbe`, needs core `>=1.74.0`):
+  `compat.core` is `>=1.74.0 <2.0` (placeholder; the parent session sets the
+  final range at landing). The resolver result is `bound | reject`, `chatAgent`
+  always set (the old `fallback` decision is gone). On `reject` the text still
+  reaches that ChatAgent (it carries out `/agent`, `/agents`) and only a
+  `system` answer is posted, else the resolver `notice`. **The principal is
+  built only with the SDK's `turnPrincipal` / `channelUserPrincipal`**:
+  `user:slack-user:<id>` lowercase (was `user:<id>`). The pace
+  acknowledgement goes out under the speaker the resolver announces
+  (`ChannelResolveResult.speaker`), no longer as `system`; without a speaker
+  it is skipped, and an answer without a speaker is withheld and replaced by a
+  `system` notice (fail-closed).
+- **Send providers**: `TargetedSendProvider` (DM by member id,
+  `user:slack-user:<id>` or e-mail via `users.lookupByEmail`, scope
+  `users:read.email`) and `ConversationSendProvider`, registered when the
+  kernel offers them. `system` messages through the outbox; `mentions`
+  declared; `asChannelKey`, polls and cards are not (the sender falls back to
+  a plain-text ballot, `renderCardAsText` / `parseCardReply`, criterion 30).
 - **Conversation roster**: `ConversationRosterProvider` via
   `conversations.members` with honest `complete` / `partial` / `unknown`. New
   bot scopes `channels:read`, `groups:read`, `im:read`, `mpim:read`; without
