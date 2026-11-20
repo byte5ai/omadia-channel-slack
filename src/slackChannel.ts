@@ -6,10 +6,12 @@ import type { IncomingTurn } from '@omadia/channel-sdk';
 
 import {
   buildIncomingTurn,
+  supportedLocale,
   commandToEvent,
   extractText,
   stripMention,
   type SlackMessageEvent,
+  type SlackSenderProfile,
   type SlackSlashCommandPayload,
   type TurnSource,
 } from './inbound.js';
@@ -48,6 +50,12 @@ const USERS_CACHE_TTL_MS = 5 * 60 * 1000;
 const USERS_PAGE_SIZE = 200;
 const USERS_CACHE_MAX = 2_000;
 
+/** Sender profiles (`users.info`): a known member keeps its profile for an hour, a failed lookup is retried after a minute, and a slow Slack never holds a turn longer than the timeout. */
+const PROFILE_TTL_MS = 60 * 60 * 1000;
+const PROFILE_FAILURE_TTL_MS = 60 * 1000;
+const PROFILE_TIMEOUT_MS = 1_500;
+const PROFILE_CACHE_MAX = 2_000;
+
 /** `conversations.members` page size (Slack allows up to 1000; 200 is the documented default). */
 const MEMBERS_PAGE_SIZE = 200;
 
@@ -66,6 +74,7 @@ const MEMBERS_PAGE_SIZE = 200;
 export class SlackChannel implements SlackSink {
   private readonly web: WebClient;
   private botUserId = '';
+  private readonly profiles = new Map<string, { profile: SlackSenderProfile; expiresAt: number }>();
   private usersCache: { users: SlackDirectoryUser[]; truncated: boolean; fetchedAt: number } | undefined;
   /** `${channel}:${ts}` of messages already handled — Slack delivers a mention
    *  as BOTH an `app_mention` and a `message` event (and the Events API may
@@ -190,13 +199,46 @@ export class SlackChannel implements SlackSink {
       });
       patchState(this.deps.state, { lastInboundAt: Date.now() });
 
-      await this.deps.onMessage(buildIncomingTurn(this.deps.channelId, event, text, teamId, source));
+      const profile = event.user ? await this.senderProfile(event.user) : {};
+      await this.deps.onMessage(buildIncomingTurn(this.deps.channelId, event, text, teamId, source, profile));
     } catch (err) {
       this.deps.log('error', 'error handling inbound Slack message', {
         channel: event.channel,
         error: errMessage(err),
       });
     }
+  }
+
+  /**
+   * E-mail and language of a sender (`users.info`, bot scope `users:read`;
+   * `users:read.email` for the address). The e-mail makes the principal the
+   * cross-channel one (`user:<e-mail>`), the language is the notice locale.
+   * Never throws and never blocks a turn for long: an unknown profile is `{}`
+   * (principal `user:slack-user:<id>`, German notices).
+   */
+  async senderProfile(userId: string): Promise<SlackSenderProfile> {
+    const cached = this.profiles.get(userId);
+    if (cached && cached.expiresAt > Date.now()) return cached.profile;
+    try {
+      const res = await Promise.race([
+        this.web.users.info({ user: userId, include_locale: true }),
+        new Promise<never>((_, reject) => setTimeout(() => reject(new Error('users.info timed out')), PROFILE_TIMEOUT_MS).unref()),
+      ]);
+      const email = res.user?.profile?.email?.trim().toLowerCase();
+      const locale = supportedLocale(res.user?.locale);
+      const profile: SlackSenderProfile = { ...(email ? { email } : {}), ...(locale ? { locale } : {}) };
+      this.rememberProfile(userId, profile, PROFILE_TTL_MS);
+      return profile;
+    } catch (err) {
+      this.deps.log('warn', 'Slack sender profile unavailable', { error: errMessage(err) });
+      this.rememberProfile(userId, {}, PROFILE_FAILURE_TTL_MS);
+      return {};
+    }
+  }
+
+  private rememberProfile(userId: string, profile: SlackSenderProfile, ttlMs: number): void {
+    if (this.profiles.size >= PROFILE_CACHE_MAX) this.profiles.clear();
+    this.profiles.set(userId, { profile, expiresAt: Date.now() + ttlMs });
   }
 
   /** Post a message. `threadTs` threads the reply (channel messages); omit for

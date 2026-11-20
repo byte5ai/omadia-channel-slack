@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { buildIncomingTurn, commandToEvent, type SlackSlashCommandPayload, type SlackTurnMeta } from '../src/inbound.js';
+import { supportedLocale, buildIncomingTurn, commandToEvent, type SlackSlashCommandPayload, type SlackTurnMeta } from '../src/inbound.js';
 
 const payload = (over: Partial<SlackSlashCommandPayload> = {}): SlackSlashCommandPayload => ({
   command: '/agent',
@@ -55,4 +55,11 @@ test('a plain message keeps its thread scope and states direct vs group', () => 
   assert.equal(ch.conversationType, 'group');
   const dm = buildIncomingTurn('s', { type: 'message', channel: 'D1', user: 'U1', ts: '5.5', channel_type: 'im' }, 'x', undefined);
   assert.equal(dm.conversationType, 'direct');
+});
+
+test('only de and en are carried as the sender language', () => {
+  assert.equal(supportedLocale('de-DE'), 'de');
+  assert.equal(supportedLocale('en_US'), 'en');
+  assert.equal(supportedLocale('fr-FR'), undefined);
+  assert.equal(supportedLocale(undefined), undefined);
 });

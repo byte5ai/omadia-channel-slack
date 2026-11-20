@@ -340,3 +340,29 @@ test('a command that outlives its response_url window is delivered as an ephemer
   assert.equal(outbox.sink.calls[1]?.target, 'C1/U1');
   assert.equal(outbox.sink.calls.filter((c) => c.text === paceAckText('de')).length, 1);
 });
+
+test('the resolver gets the sender language, and the pace acknowledgement speaks it', async () => {
+  const asked: Array<RouteCtx | undefined> = [];
+  const { clock, advance } = manualClock();
+  const outbox = new SpyOutbox();
+  let release: () => void = () => undefined;
+  const slow = { chat: () => new Promise((r) => { release = () => r(answer('Done.')); }) } as unknown as ChatAgent;
+  const route = services((_t, _k, ctx) => (asked.push(ctx), { decision: 'bound', chatAgent: slow, speaker: MIRA }));
+  const turn = buildIncomingTurn('slack-1', event(), 'hello', 'T1', {}, { locale: 'en' });
+  const done = handleSlackTurn(deps({ outbox, route, clock }), turn);
+  await advance(8_001);
+  release();
+  await done;
+  assert.deepEqual(asked, [{ principal: 'user:slack-user:u1', locale: 'en' }]);
+  assert.equal(outbox.sink.calls[0]?.text, paceAckText('en'));
+});
+
+test('a verified e-mail makes the routing principal user:<e-mail> and reaches the origin', async () => {
+  const outbox = new SpyOutbox();
+  const seen: ChatInput[] = [];
+  const asked: Array<RouteCtx | undefined> = [];
+  const route = services((_t, _k, ctx) => (asked.push(ctx), { decision: 'bound', chatAgent: agentReturning(answer('ok'), seen), speaker: MIRA }));
+  await handleSlackTurn(deps({ outbox, route }), buildIncomingTurn('slack-1', event(), 'hi', 'T1', {}, { email: 'anna@example.com' }));
+  assert.equal(asked[0]?.principal, 'user:anna@example.com');
+  assert.deepEqual(seen[0]?.origin?.principal, { kind: 'user', userId: 'anna@example.com' });
+});

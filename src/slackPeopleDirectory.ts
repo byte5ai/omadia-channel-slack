@@ -1,5 +1,6 @@
-import type {
-  PeopleDirectoryEntry,
+import {
+  channelUserPrincipal,
+  type PeopleDirectoryEntry,
   PeopleDirectoryLookup,
   PeopleDirectoryProvider,
 } from '@omadia/channel-sdk';
@@ -23,11 +24,10 @@ export interface SlackUserSearch {
  * Slack people directory — the kernel's `PeopleDirectoryProvider` for
  * `channelType: 'slack'` (Conductor human-step principal resolution).
  *
- * `principalRef` is the Slack member id (`U…`): the Slack channel sets no
- * `principalRef` on inbound turns, so the kernel's binding key for a Slack
- * user IS the member id (`bindingKeyForTurn`: principalRef || userId). Writing
- * that id into `human.principal.ref` is what makes reminders and awaits reach
- * the person. Needs the `users:read` bot scope (+ `users:read.email` to show
+ * `principalRef` is built with the SDK's `channelUserPrincipal` — the same
+ * principal an inbound turn of the person carries (`user:<e-mail>` with a
+ * verified e-mail, else `user:slack-user:<id>`) — so awaits and reminders
+ * written into `human.principal.ref` meet the turn. Needs the `users:read` bot scope (+ `users:read.email` to show
  * addresses); a missing scope answers `unavailable/not_configured`, never a
  * crash — the kernel then shows a *partial* result and the operator keeps the
  * free-text field.
@@ -57,10 +57,23 @@ export function createSlackPeopleDirectoryProvider(opts: {
   };
 }
 
+const USER_PRINCIPAL_PREFIX = 'user:';
+
+/**
+ * The reference Conductor writes into `human.principal.ref`: the part after
+ * `user:` of the SDK's {@link channelUserPrincipal}, the one principal an
+ * inbound turn of this person carries (`slack-user:<id>`, or the e-mail when
+ * the profile has one). Same function on both sides, so an await finds the turn.
+ */
+export function slackPrincipalRef(user: Pick<SlackDirectoryUser, 'id' | 'email'>): string {
+  const principal = channelUserPrincipal({ kind: 'slack-user', id: user.id, ...(user.email ? { email: user.email } : {}) });
+  return principal.slice(USER_PRINCIPAL_PREFIX.length);
+}
+
 function toEntry(user: SlackDirectoryUser): PeopleDirectoryEntry {
   const displayName = [user.realName, user.displayName, user.name].find((n) => n && n.trim().length > 0)?.trim() ?? user.id;
   return {
-    principalRef: user.id,
+    principalRef: slackPrincipalRef(user),
     displayName,
     ...(user.email && user.email.trim() ? { email: user.email.trim().toLowerCase() } : {}),
     channelUserId: user.id,

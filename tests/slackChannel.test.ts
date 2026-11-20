@@ -9,7 +9,9 @@ import { createChannelState } from '../src/state.js';
 
 const URL_OK = 'https://hooks.slack.com/commands/T1/1/x';
 
-function make(policy: Partial<AccessPolicy> = {}) {
+type InfoCall = { user: string; include_locale?: boolean };
+
+function make(policy: Partial<AccessPolicy> = {}, info: (args: InfoCall) => Promise<unknown> = async () => ({ user: {} })) {
   const turns: IncomingTurn[] = [];
   const reactions: unknown[] = [];
   const channel = new SlackChannel({
@@ -23,7 +25,10 @@ function make(policy: Partial<AccessPolicy> = {}) {
   // Any reaction would go through the Web client: record it.
   const web = (channel as unknown as { web: { reactions?: { add: (a: unknown) => Promise<void> } } }).web;
   if (web.reactions) web.reactions.add = async (a) => void reactions.push(a);
-  return { channel, turns, reactions };
+  // users.info is the sender profile lookup: never let a test reach Slack.
+  const infoCalls: InfoCall[] = [];
+  (web as unknown as { users: { info: (a: InfoCall) => Promise<unknown> } }).users.info = async (a) => (infoCalls.push(a), info(a));
+  return { channel, turns, reactions, infoCalls };
 }
 
 const command = (over: Partial<SlackSlashCommandPayload> = {}): SlackSlashCommandPayload => ({
@@ -99,4 +104,27 @@ test('replyToCommand refuses a foreign URL and surfaces a failed post', async ()
   await assert.rejects(channel.replyToCommand('https://evil.example/x', 't'), /not a Slack https URL/);
   globalThis.fetch = (async () => ({ ok: false, status: 404 }) as Response) as unknown as typeof fetch;
   await assert.rejects(channel.replyToCommand(URL_OK, 't'), /HTTP 404/);
+});
+
+test('the sender profile gives the turn an e-mail principal and the language, cached per member', async () => {
+  const { channel, turns, infoCalls } = make({}, async () => ({ user: { locale: 'en-US', profile: { email: ' Anna@Example.com ' } } }));
+  await channel.ingest({ type: 'app_mention', channel: 'C1', user: 'U1', text: 'a', ts: '1.1' }, 'T1');
+  await channel.ingest({ type: 'app_mention', channel: 'C1', user: 'U1', text: 'b', ts: '1.2' }, 'T1');
+  assert.equal(turns[0]?.userRef.email, 'anna@example.com');
+  assert.equal((turns[0]?.metadata as { locale?: string }).locale, 'en');
+  assert.deepEqual(infoCalls, [{ user: 'U1', include_locale: true }], 'one users.info call for two messages');
+});
+
+test('a language other than de/en is left out, and no e-mail means no e-mail on the turn', async () => {
+  const { channel, turns } = make({}, async () => ({ user: { locale: 'fr-FR', profile: {} } }));
+  await channel.ingest({ type: 'app_mention', channel: 'C1', user: 'U1', text: 'a', ts: '1.1' }, 'T1');
+  assert.equal(turns[0]?.userRef.email, undefined);
+  assert.equal((turns[0]?.metadata as { locale?: string }).locale, undefined);
+});
+
+test('a failing profile lookup never drops the turn: German notices, id principal', async () => {
+  const { channel, turns } = make({}, async () => { throw Object.assign(new Error('missing_scope'), { data: { error: 'missing_scope' } }); });
+  await channel.ingest({ type: 'app_mention', channel: 'C1', user: 'U1', text: 'a', ts: '1.1' }, 'T1');
+  assert.equal(turns.length, 1);
+  assert.equal(turns[0]?.userRef.email, undefined);
 });

@@ -74,6 +74,22 @@ export interface SlackTurnMeta {
   responseUrl?: string;
   /** Slash commands only: who typed it. */
   commandUserId?: string;
+  /** The sender's language (`de` / `en`) when Slack states it; the kernel's notices follow it. */
+  locale?: string;
+}
+
+/** What Slack knows about the sender beyond the event (`users.info`). */
+export interface SlackSenderProfile {
+  /** The member's e-mail (bot scope `users:read.email`), lowercase. Slack confirms workspace e-mail addresses. */
+  readonly email?: string;
+  /** `de` or `en`; any other language is left out (the kernel then writes German). */
+  readonly locale?: string;
+}
+
+/** `de-DE` / `en_US` → `de` / `en`; anything else → `undefined`. */
+export function supportedLocale(raw: string | undefined): string | undefined {
+  const language = raw?.trim().slice(0, 2).toLowerCase();
+  return language === 'de' || language === 'en' ? language : undefined;
 }
 
 /** Pull trimmed plain text out of a Slack message. Returns `undefined` when
@@ -113,6 +129,7 @@ export function buildIncomingTurn(
   text: string,
   teamId: string | undefined,
   source: TurnSource = {},
+  profile: SlackSenderProfile = {},
 ): IncomingTurn {
   const channelType = event.channel_type ?? 'channel';
   const isDm = channelType === 'im';
@@ -125,6 +142,7 @@ export function buildIncomingTurn(
     eventTs: event.ts,
     ...(command?.responseUrl ? { responseUrl: command.responseUrl } : {}),
     ...(command && event.user ? { commandUserId: event.user } : {}),
+    ...(profile.locale ? { locale: profile.locale } : {}),
   };
   return {
     channelId,
@@ -133,6 +151,7 @@ export function buildIncomingTurn(
     userRef: {
       kind: 'slack-user',
       id: event.user ?? event.channel,
+      ...(profile.email ? { email: profile.email } : {}),
     },
     text,
     metadata: meta as unknown as Record<string, unknown>,

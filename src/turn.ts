@@ -114,8 +114,9 @@ function rejectionOf(result: ChannelResolveResult): { agent?: ChatAgent; notice?
 /**
  * The sender as a principal, in the one form every channel uses (S1 contract,
  * spec 2042 §5.3): `channelUserPrincipal` / `turnPrincipal` from the SDK, never
- * a form built here. A Slack message event carries no verified e-mail, so the
- * result is `user:slack-user:<member id, lowercase>`.
+ * a form built here: `user:<e-mail>` when the sender's profile gave one
+ * (`IncomingTurn.userRef.email`, from `users.info`), else
+ * `user:slack-user:<member id, lowercase>`.
  */
 export function slackSenderPrincipal(turn: Pick<IncomingTurn, 'userRef'>): string {
   return turnPrincipal(turn.userRef);
@@ -212,7 +213,7 @@ export async function handleSlackTurn(deps: TurnDeps, turn: IncomingTurn): Promi
       deps.route,
       [turn.conversationId, meta.teamId],
       deps.defaultAgent,
-      { principal: slackSenderPrincipal(turn) },
+      { principal: slackSenderPrincipal(turn), ...(meta.locale ? { locale: meta.locale } : {}) },
       turn.text,
     );
     const refusal = resolution.kind === 'refused' ? resolution : undefined;
@@ -245,7 +246,7 @@ export async function handleSlackTurn(deps: TurnDeps, turn: IncomingTurn): Promi
         onHookError: (hook, error) =>
           deps.log('warn', `Slack pace ${hook} failed`, { error: (error as Error).message }),
       },
-      { locale: PACE_LOCALE, ...(deps.clock ? { clock: deps.clock } : {}) },
+      { locale: meta.locale ?? PACE_LOCALE, ...(deps.clock ? { clock: deps.clock } : {}) },
     );
     const answer = paced.result;
     if (isNoReply(answer)) {
