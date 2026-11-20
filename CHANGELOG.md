@@ -23,6 +23,12 @@ plugin runs its own app only, as before.
 - **Sends and rosters per app**: the providers declare `asChannelKey` and post
   through exactly the app named (unknown key: unreachable); `presentIn` tells
   the kernel which agent apps are members of a conversation.
+- **Triggers and routines deliver through the app they were set on** (spec
+  2042 §5.12): every turn opens the kernel's routines scope
+  (`routinesIntegration@1`, optional) with a delivery ref naming the conversation and,
+  on an agent's own app, that app (`asChannelKey`); the proactive send posts
+  through exactly that app (no name line on an agent's app, named like an
+  answer on the installation's). An app that no longer runs here is an error.
 - **`compat.core` `>=1.79.0 <2.0`** (placeholder): needs the kernel with agent
   channel identities (S7). The parent session sets the final range on release.
 

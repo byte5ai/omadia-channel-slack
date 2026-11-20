@@ -272,6 +272,10 @@ requires:
   - "chatAgent@^1"
 optional_requires:
   - "channelResolver@1"
+  # Kernel-side, only with a database: each turn opens its routines scope
+  # (triggers, routines) and deliveries go out through the app they were set
+  # on. Absent = agents set no triggers here.
+  - "routinesIntegration@1"
 provides: []
 
 # Generic admin-UI iframe surface (rendered by web-ui for any plugin that

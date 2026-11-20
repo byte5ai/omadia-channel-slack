@@ -22,6 +22,7 @@ import {
 
 import type { SlackMessageEvent, SlackTurnMeta } from './inbound.js';
 import type { DeliveryTarget, SlackOutbox } from './outbox.js';
+import type { SlackRoutineTurn } from './routines.js';
 import { SLACK_CHANNEL_TYPE } from './renderer.js';
 
 /**
@@ -173,6 +174,12 @@ export interface TurnDeps {
    * agent never answers as another.
    */
   readonly ownBotKey?: () => string | undefined;
+  /**
+   * Spec 2042 §5.12 — opens the kernel's routines scope for a person's turn,
+   * so the agent may set triggers and routines that deliver back here
+   * (through this app). Absent = the kernel publishes no routines.
+   */
+  readonly routineTurn?: SlackRoutineTurn;
 }
 
 /**
@@ -252,14 +259,23 @@ export async function handleSlackTurn(deps: TurnDeps, turn: IncomingTurn): Promi
       return;
     }
     const speaker = resolution.kind === 'agent' ? resolution.speaker : undefined;
+    const chat = () =>
+      agent.chat({
+        userMessage: turn.text,
+        sessionScope: meta.sessionScope,
+        userId: turn.userRef.id,
+        origin,
+      });
+    // The routines scope wraps the whole turn: who asks, and where a trigger
+    // or routine the agent sets now delivers later.
+    const scoped = deps.routineTurn?.({
+      userId: turn.userRef.id,
+      conversationId: turn.conversationId,
+      conversationKey: meta.sessionScope,
+      ...(meta.threadTs ? { threadTs: meta.threadTs } : {}),
+    });
     const paced = await runPacedTurn(
-      () =>
-        agent.chat({
-          userMessage: turn.text,
-          sessionScope: meta.sessionScope,
-          userId: turn.userRef.id,
-          origin,
-        }),
+      () => (scoped ? scoped(chat) : chat()),
       slackPaceProfile(meta),
       {
         sendAck: async (text) => {

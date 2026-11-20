@@ -9,7 +9,7 @@ import {
   type CoreApi,
   type LogLevel,
 } from '@omadia/channel-sdk';
-import type { PluginContext } from '@omadia/plugin-api';
+import type { PluginContext, RoutinesIntegration } from '@omadia/plugin-api';
 
 import { createAdminRouter } from './adminRouter.js';
 import {
@@ -28,6 +28,7 @@ import { createSlackRosterProvider } from './slackRoster.js';
 import { createSlackSendProviders } from './slackSendProviders.js';
 import { SocketModeTransport } from './socketModeTransport.js';
 import { createChannelState, patchState } from './state.js';
+import { createSlackProactiveSend, createSlackRoutineTurn, ROUTINES_INTEGRATION_SERVICE } from './routines.js';
 import { handleSlackTurn, type TurnDeps } from './turn.js';
 
 const EVENTS_ROUTE_PREFIX = '/api/slack';
@@ -73,6 +74,10 @@ export async function activate(ctx: PluginContext, core: CoreApi): Promise<Chann
     );
   }
 
+  // Triggers and routines (spec 2042 §5.12): published by the kernel only
+  // with a database. Absent = agents cannot set triggers or routines here.
+  const routines = ctx.services.get<RoutinesIntegration>(ROUTINES_INTEGRATION_SERVICE);
+
   const state = createChannelState();
   state.mode = mode;
   const log = (level: LogLevel, message: string, context?: Record<string, unknown>) =>
@@ -95,6 +100,10 @@ export async function activate(ctx: PluginContext, core: CoreApi): Promise<Chann
       outbox,
       log,
       ...(agentBot ? { ownBotKey: () => channel.channelKey() } : {}),
+      // A trigger or routine the agent sets here delivers through this app.
+      ...(routines
+        ? { routineTurn: createSlackRoutineTurn(routines, channelId, () => (agentBot ? channel.channelKey() : undefined)) }
+        : {}),
     });
     channel = new SlackChannel({
       channelId,
@@ -158,6 +167,9 @@ export async function activate(ctx: PluginContext, core: CoreApi): Promise<Chann
     const { targeted, conversation } = createSlackSendProviders((key) => fleet.sendFor(key));
     core.registerTargetedSendProvider?.(channelId, targeted);
     core.registerConversationSendProvider?.(channelId, conversation);
+    // Trigger and routine deliveries go out through the app the conversation
+    // came through: an agent's own app, or the installation's.
+    routines?.publishProactiveSend(SLACK_CHANNEL_TYPE, createSlackProactiveSend((key) => fleet.sendFor(key)));
   };
 
   // Status admin UI. web-ui renders this as an iframe (manifest
