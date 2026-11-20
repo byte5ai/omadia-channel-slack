@@ -23,7 +23,7 @@ import { WebClient } from '@slack/web-api';
 import type {
   AgentIdentityField,
   AgentIdentityProvider,
-  AgentIdentityProvisionOutcome,
+  AgentIdentityRefusal,
   ConversationRoster,
   ConversationRosterProvider,
   ConversationRosterRequest,
@@ -120,9 +120,39 @@ export class SlackAppFleet {
     return this.agentApps.get(slackBotChannelKey(botUserId));
   }
 
-  add(app: SlackAgentApp): void {
+  private closed = false;
+  /** Apps whose start waits for Slack to become reachable again (boot). */
+  private readonly retrying = new Set<string>();
+
+  /**
+   * Hold a started app. An app that runs under the key already is closed
+   * first (never two connections for one app), and after {@link closeAll}
+   * nothing is held: a late start is closed at once. `false` = not added.
+   */
+  async add(app: SlackAgentApp): Promise<boolean> {
+    if (this.closed) {
+      await app.close();
+      return false;
+    }
+    const previous = this.agentApps.get(app.botKey);
     this.agentApps.set(app.botKey, app);
+    this.retrying.delete(app.botKey);
     this.presence.clear();
+    if (previous && previous !== app) await previous.close();
+    return true;
+  }
+
+  get isClosed(): boolean {
+    return this.closed;
+  }
+
+  markRetrying(botKey: string, retrying: boolean): void {
+    if (retrying) this.retrying.add(botKey);
+    else this.retrying.delete(botKey);
+  }
+
+  isRetrying(botKey: string): boolean {
+    return this.retrying.has(botKey);
   }
 
   remove(botKey: string): SlackAgentApp | undefined {
@@ -167,7 +197,11 @@ export class SlackAppFleet {
   }
 
   async closeAll(): Promise<void> {
-    await Promise.all([...this.agentApps.values()].map((a) => a.close()));
+    this.closed = true;
+    const running = [...this.agentApps.values()];
+    this.agentApps.clear();
+    this.retrying.clear();
+    await Promise.all(running.map((a) => a.close()));
   }
 }
 
@@ -209,10 +243,7 @@ export interface AgentAppDeps {
   readonly log: (level: 'info' | 'warn' | 'error', message: string) => void;
 }
 
-const refuse = (
-  code: Extract<AgentIdentityProvisionOutcome, { ok: false }>['code'],
-  message: string,
-): AgentIdentityProvisionOutcome => ({ ok: false, code, message });
+const refuse = (code: AgentIdentityRefusal['code'], message: string): AgentIdentityRefusal => ({ ok: false, code, message });
 
 const REJECTED_TOKEN_ERRORS = new Set(['invalid_auth', 'not_authed', 'account_inactive', 'token_revoked', 'token_expired']);
 
@@ -221,9 +252,15 @@ function slackErrorOf(err: unknown): string | undefined {
   return typeof data?.error === 'string' ? data.error : undefined;
 }
 
+function isRejectedToken(err: unknown): boolean {
+  return REJECTED_TOKEN_ERRORS.has(slackErrorOf(err) ?? '');
+}
+
 function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
+
+const isRefusal = (value: object): value is AgentIdentityRefusal => (value as { ok?: unknown }).ok === false;
 
 /** The credentials the transport needs, or why they are not usable. */
 export function credentialsFor(
@@ -244,78 +281,131 @@ export function credentialsFor(
   return { bot_token: botToken, app_token: appToken };
 }
 
+/** Which app the credentials are, or why they are refused. */
+async function appOf(
+  deps: AgentAppDeps,
+  raw: Readonly<Record<string, string>>,
+): Promise<{ credentials: AgentAppCredentials; identity: SlackBotIdentity } | AgentIdentityRefusal> {
+  const credentials = credentialsFor(deps.mode, raw);
+  if (typeof credentials === 'string') return refuse('invalid_input', credentials);
+  if (credentials.bot_token === deps.fleet.defaultApp.botToken) return refuse('already_in_use', 'this is the Slack channel’s own app');
+  try {
+    const identity = await (deps.checkToken ?? checkBotToken)(credentials.bot_token);
+    if (slackBotChannelKey(identity.botUserId) === deps.fleet.defaultApp.channelKey()) {
+      return refuse('already_in_use', 'this is the Slack channel’s own app');
+    }
+    return { credentials, identity };
+  } catch (err) {
+    return isRejectedToken(err)
+      ? refuse('invalid_credentials', 'Slack rejected this bot token')
+      : refuse('unreachable', 'Slack could not be reached to check the token');
+  }
+}
+
 export function createSlackAgentIdentityProvider(deps: AgentAppDeps): AgentIdentityProvider {
-  const check = deps.checkToken ?? checkBotToken;
   return {
     channelType: SLACK_CHANNEL_TYPE,
     fields: AGENT_APP_FIELDS,
-    async provision(input) {
-      const credentials = credentialsFor(deps.mode, input.credentials);
-      if (typeof credentials === 'string') return refuse('invalid_input', credentials);
-      if (credentials.bot_token === deps.fleet.defaultApp.botToken) {
-        return refuse('already_in_use', 'this is the Slack channel’s own app');
-      }
-      let identity: SlackBotIdentity;
-      try {
-        identity = await check(credentials.bot_token);
-      } catch (err) {
-        return REJECTED_TOKEN_ERRORS.has(slackErrorOf(err) ?? '')
-          ? refuse('invalid_credentials', 'Slack rejected this bot token')
-          : refuse('unreachable', 'Slack could not be reached to check the token');
-      }
+    // No side effect: the kernel decides whether this app is free.
+    async identify(input) {
+      const found = await appOf(deps, input.credentials);
+      if (isRefusal(found)) return found;
+      const { identity } = found;
+      return { ok: true, channelKey: slackBotChannelKey(identity.botUserId), externalRef: `@${identity.name}`, displayName: identity.name };
+    },
+    // Called only for an app no agent owns (the kernel checked).
+    async provision(input, channelKey) {
+      const found = await appOf(deps, input.credentials);
+      if (isRefusal(found)) return found;
+      const { credentials, identity } = found;
       const botKey = slackBotChannelKey(identity.botUserId);
-      if (botKey === deps.fleet.defaultApp.channelKey()) return refuse('already_in_use', 'this is the Slack channel’s own app');
+      if (botKey !== channelKey.trim().toLowerCase()) return refuse('invalid_input', 'the token names another app than the one checked');
+      if (deps.fleet.isClosed) return refuse('unreachable', 'the Slack channel is shutting down');
       const vaultKey = `${AGENT_APP_PREFIX}${identity.botUserId.toLowerCase()}`;
-      // The same app again (re-entered or rotated credentials): restart it.
-      await deps.fleet.remove(botKey)?.close();
       await deps.secrets.set(vaultKey, JSON.stringify(credentials));
       try {
-        deps.fleet.add(await deps.startAgentApp(credentials, identity));
+        // `add` closes an app that still ran under this key (nobody owned it).
+        if (!(await deps.fleet.add(await deps.startAgentApp(credentials, identity)))) {
+          return refuse('unreachable', 'the Slack channel is shutting down');
+        }
       } catch (err) {
         await deps.secrets.delete(vaultKey);
         deps.log('error', `agent app ${botKey} for '${input.agentSlug}' did not start: ${errorMessage(err)}`);
         return refuse('unreachable', 'the app could not be started');
       }
       deps.log('info', `agent app @${identity.name} (${botKey}) started for agent '${input.agentSlug}'`);
-      return { ok: true, channelKey: botKey, externalRef: `@${identity.name}`, displayName: identity.name };
+      return { ok: true };
     },
     async release(channelKey) {
       const key = channelKey.trim().toLowerCase();
+      deps.fleet.markRetrying(key, false);
       await deps.fleet.remove(key)?.close();
       const member = /^slack-bot:([a-z0-9]+)$/.exec(key)?.[1];
       if (member) await deps.secrets.delete(`${AGENT_APP_PREFIX}${member}`);
       deps.log('info', `agent app ${key} stopped and its credentials removed`);
     },
     async status(channelKey) {
-      const app = deps.fleet.agentApp(channelKey.trim().toLowerCase());
-      if (!app) return { state: 'stopped', detail: 'the app is not running in this installation (credentials missing or rejected)' };
-      const state = app.status();
-      return { state: state === 'error' ? 'stopped' : 'running', detail: state };
+      const key = channelKey.trim().toLowerCase();
+      const app = deps.fleet.agentApp(key);
+      if (app) {
+        const state = app.status();
+        return { state: state === 'error' ? 'stopped' : 'running', detail: state };
+      }
+      if (deps.fleet.isRetrying(key)) return { state: 'unknown', detail: 'Slack is not reachable; the app starts as soon as it is' };
+      return { state: 'stopped', detail: 'the app is not running in this installation (credentials missing or rejected)' };
     },
     defaultChannelKey: () => deps.fleet.defaultApp.channelKey(),
     presentIn: (conversationId) => deps.fleet.presentIn(conversationId),
   };
 }
 
-/** Start every agent app whose credentials are in the vault (boot). */
-export async function startStoredAgentApps(deps: AgentAppDeps): Promise<void> {
+/** Backoff of a stored app whose start failed because Slack was not reachable. */
+export const BOOT_RETRY_DELAYS_MS: readonly number[] = [5_000, 15_000, 60_000, 300_000];
+
+/**
+ * Start every agent app whose credentials are in the vault (boot), all at
+ * once. A token Slack REJECTS stays where it is and the app stays stopped;
+ * any other failure (Slack unreachable during a deploy) is retried with backoff.
+ */
+export async function startStoredAgentApps(
+  deps: AgentAppDeps,
+  sleep: (ms: number) => Promise<void> = (ms) => new Promise((r) => setTimeout(r, ms)),
+): Promise<void> {
   const check = deps.checkToken ?? checkBotToken;
   const keys = (await deps.secrets.keys()).filter((k) => k.startsWith(AGENT_APP_PREFIX));
-  for (const key of keys) {
-    try {
-      const raw = await deps.secrets.get(key);
-      if (!raw) continue;
-      const credentials = credentialsFor(deps.mode, JSON.parse(raw) as Record<string, string>);
+  const startOne = async (key: string): Promise<void> => {
+    const botKey = `slack-bot:${key.slice(AGENT_APP_PREFIX.length)}`;
+    for (let attempt = 0; !deps.fleet.isClosed; attempt++) {
+      let credentials: AgentAppCredentials | string;
+      try {
+        const raw = await deps.secrets.get(key);
+        if (!raw) return;
+        credentials = credentialsFor(deps.mode, JSON.parse(raw) as Record<string, string>);
+      } catch {
+        deps.log('warn', `agent app from vault key ${key} not started: unreadable credentials`);
+        return;
+      }
       if (typeof credentials === 'string') {
         deps.log('warn', `agent app from vault key ${key} not started: ${credentials}`);
-        continue;
+        return;
       }
-      const identity = await check(credentials.bot_token);
-      if (deps.fleet.agentApp(slackBotChannelKey(identity.botUserId))) continue;
-      deps.fleet.add(await deps.startAgentApp(credentials, identity));
-    } catch (err) {
-      deps.log('warn', `agent app from vault key ${key} did not start: ${errorMessage(err)}`);
+      try {
+        const identity = await check(credentials.bot_token);
+        if (deps.fleet.agentApp(slackBotChannelKey(identity.botUserId))) return;
+        await deps.fleet.add(await deps.startAgentApp(credentials, identity));
+        return;
+      } catch (err) {
+        if (isRejectedToken(err)) {
+          deps.log('warn', `agent app from vault key ${key} not started: Slack rejects its token`);
+          return;
+        }
+        const delay = BOOT_RETRY_DELAYS_MS[Math.min(attempt, BOOT_RETRY_DELAYS_MS.length - 1)] ?? 300_000;
+        deps.fleet.markRetrying(botKey, true);
+        deps.log('warn', `agent app from vault key ${key} did not start (${errorMessage(err)}); retrying in ${String(delay)} ms`);
+        await sleep(delay);
+      }
     }
-  }
+  };
+  await Promise.all(keys.map(startOne));
   deps.log('info', `slack agent apps running: ${String(deps.fleet.agentAppKeys().length)}`);
 }

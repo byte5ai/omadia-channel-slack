@@ -101,7 +101,9 @@ export async function activate(ctx: PluginContext, core: CoreApi): Promise<Chann
       botToken: appBotToken,
       log,
       state: appState,
-      policy: { respondInChannels, allowDms, allowlist },
+      // An agent's app answers when addressed (mention, DM); "every message"
+      // is the kernel's to hand out, or N agents would answer one message.
+      policy: { respondInChannels: agentBot ? 'mention' : respondInChannels, allowDms, allowlist },
       onMessage: (turn) => handleSlackTurn(turnDeps(), turn),
       // Message record for the kernel (typed answers to a poll). Feature-detected.
       ...(core.emitConversationMessage
@@ -184,7 +186,6 @@ export async function activate(ctx: PluginContext, core: CoreApi): Promise<Chann
   // The same transport as the channel's own app. Needs the vault write
   // permission and a kernel that takes agent identities; without either,
   // agents keep `/agent`.
-  const agentTransports = new Map<string, () => void>();
   const agentApps = async (): Promise<void> => {
     const secrets = ctx.secrets;
     if (!secrets.set || !secrets.delete) return;
@@ -203,10 +204,12 @@ export async function activate(ctx: PluginContext, core: CoreApi): Promise<Chann
         const app = buildApp(credentials.bot_token, true, appState);
         await app.channel.init();
         const botKey = slackBotChannelKey(identity.botUserId);
+        // Each app closes its OWN connection (the fleet closes a replaced app).
+        let closeTransport = (): void => undefined;
         if (mode === 'socket' && credentials.app_token) {
           const transport = new SocketModeTransport({ appToken: credentials.app_token, channel: app.channel, log: core.log.bind(core), state: appState });
           transport.start();
-          agentTransports.set(botKey, () => void transport.close());
+          closeTransport = () => void transport.close();
         } else {
           patchState(appState, { status: 'connected' });
         }
@@ -222,8 +225,7 @@ export async function activate(ctx: PluginContext, core: CoreApi): Promise<Chann
           isMemberOf: (conversationId) => app.channel.isMemberOf(conversationId),
           status: () => (appState.status === 'connected' ? 'connected' : appState.status === 'error' ? 'error' : 'connecting'),
           close: async () => {
-            agentTransports.get(botKey)?.();
-            agentTransports.delete(botKey);
+            closeTransport();
           },
         } satisfies SlackAgentAppRuntime;
       },

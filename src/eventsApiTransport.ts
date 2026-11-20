@@ -49,7 +49,9 @@ export function createEventsApiRouter(deps: EventsApiRouterDeps): Router {
 export function createAgentBotsEventsRouter(lookup: (botUserId: string) => EventsApiRouterDeps | undefined): Router {
   return eventsRouter('/:botUserId', (req) => {
     const raw = req.params['botUserId'];
-    return typeof raw === 'string' && /^[a-z0-9]{6,30}$/.test(raw) ? lookup(raw) : undefined;
+    // Slack shows member ids in capitals (U0ABC123); the key is lowercase.
+    const member = typeof raw === 'string' ? raw.toLowerCase() : '';
+    return /^[a-z0-9]{6,30}$/.test(member) ? lookup(member) : undefined;
   });
 }
 

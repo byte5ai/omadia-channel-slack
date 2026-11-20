@@ -103,10 +103,15 @@ describe('credentials per transport', () => {
 });
 
 describe('identity provider', () => {
-  test('checks the token, keeps the credentials in the vault, starts the app, returns slack-bot:<member id> lowercase', async () => {
+  test('identify names the app without a side effect; provision keeps the credentials and starts it', async () => {
     const r = rig('webhook', mira);
-    const out = await r.provider.provision(input({ bot_token: MIRA_TOKEN, signing_secret: MIRA_SECRET }));
-    assert.deepEqual(out, { ok: true, channelKey: 'slack-bot:umira01', externalRef: '@mira', displayName: 'mira' });
+    const creds = input({ bot_token: MIRA_TOKEN, signing_secret: MIRA_SECRET });
+    const named = await r.provider.identify(creds);
+    assert.deepEqual(named, { ok: true, channelKey: 'slack-bot:umira01', externalRef: '@mira', displayName: 'mira' });
+    assert.equal(r.secrets.data.size, 0, 'identify stores nothing');
+    assert.deepEqual(r.started, [], 'identify starts nothing');
+    const out = await r.provider.provision(creds, 'slack-bot:umira01');
+    assert.deepEqual(out, { ok: true });
     assert.deepEqual(JSON.parse(r.secrets.data.get(`${AGENT_APP_PREFIX}umira01`) ?? '{}'), {
       bot_token: MIRA_TOKEN,
       signing_secret: MIRA_SECRET,
@@ -118,10 +123,10 @@ describe('identity provider', () => {
 
   test('refuses the channel’s own app, by token and by member id', async () => {
     const byToken = rig('webhook', mira);
-    const a = await byToken.provider.provision(input({ bot_token: DEFAULT_TOKEN, signing_secret: MIRA_SECRET }));
+    const a = await byToken.provider.identify(input({ bot_token: DEFAULT_TOKEN, signing_secret: MIRA_SECRET }));
     assert.equal(a.ok === false && a.code, 'already_in_use');
     const byMember = rig('webhook', async () => ({ botUserId: 'UDEFAULT', name: 'colleague', teamId: 'T1' }));
-    const b = await byMember.provider.provision(input({ bot_token: MIRA_TOKEN, signing_secret: MIRA_SECRET }));
+    const b = await byMember.provider.identify(input({ bot_token: MIRA_TOKEN, signing_secret: MIRA_SECRET }));
     assert.equal(b.ok === false && b.code, 'already_in_use');
     assert.equal(byMember.secrets.data.size, 0);
   });
@@ -130,25 +135,45 @@ describe('identity provider', () => {
     const rejected = rig('socket', async () => {
       throw Object.assign(new Error('An API error occurred: invalid_auth'), { data: { error: 'invalid_auth' } });
     });
-    const a = await rejected.provider.provision(input({ bot_token: MIRA_TOKEN, app_token: MIRA_APP_TOKEN }));
+    const a = await rejected.provider.identify(input({ bot_token: MIRA_TOKEN, app_token: MIRA_APP_TOKEN }));
     assert.equal(a.ok === false && a.code, 'invalid_credentials');
     const down = rig('socket', async () => {
       throw new Error('getaddrinfo ENOTFOUND slack.com');
     });
-    const b = await down.provider.provision(input({ bot_token: MIRA_TOKEN, app_token: MIRA_APP_TOKEN }));
+    const b = await down.provider.identify(input({ bot_token: MIRA_TOKEN, app_token: MIRA_APP_TOKEN }));
     assert.equal(b.ok === false && b.code, 'unreachable');
   });
 
   test('release stops the app and deletes its credentials; boot restarts stored apps', async () => {
     const r = rig('socket', mira);
-    await r.provider.provision(input({ bot_token: MIRA_TOKEN, app_token: MIRA_APP_TOKEN }));
+    await r.provider.provision(input({ bot_token: MIRA_TOKEN, app_token: MIRA_APP_TOKEN }), 'slack-bot:umira01');
     const running = r.fleet.agentApp('slack-bot:umira01') as SlackAgentApp & { closed: number };
     await r.provider.release('SLACK-BOT:UMIRA01');
     assert.equal(running.closed, 1);
     assert.equal(r.secrets.data.size, 0);
     r.secrets.data.set(`${AGENT_APP_PREFIX}umira01`, JSON.stringify({ bot_token: MIRA_TOKEN, app_token: MIRA_APP_TOKEN }));
-    await startStoredAgentApps(r.deps);
+    await startStoredAgentApps(r.deps, async () => undefined);
     assert.deepEqual(r.fleet.agentAppKeys(), ['slack-bot:umira01']);
+  });
+
+  test('boot retries while Slack is unreachable; a replaced app is closed; nothing is held after closeAll', async () => {
+    let calls = 0;
+    const r = rig('socket', async () => {
+      calls += 1;
+      if (calls < 3) throw new Error('getaddrinfo ENOTFOUND slack.com');
+      return mira();
+    });
+    r.secrets.data.set(`${AGENT_APP_PREFIX}umira01`, JSON.stringify({ bot_token: MIRA_TOKEN, app_token: MIRA_APP_TOKEN }));
+    const states: string[] = [];
+    await startStoredAgentApps(r.deps, async () => void states.push((await r.provider.status!('slack-bot:umira01')).state));
+    assert.deepEqual(states, ['unknown', 'unknown']);
+    const first = r.fleet.agentApp('slack-bot:umira01') as SlackAgentApp & { closed: number };
+    await r.fleet.add(app('UMIRA01'));
+    assert.equal(first.closed, 1, 'the replaced app is closed');
+    await r.fleet.closeAll();
+    const late = app('UMIRA01');
+    assert.equal(await r.fleet.add(late), false);
+    assert.equal(late.closed, 1);
   });
 });
 
@@ -157,7 +182,7 @@ describe('fleet', () => {
     const defaultSink = new RecordingSink();
     const miraSink = new RecordingSink();
     const r = rig('webhook', mira, defaultSink);
-    r.fleet.add(app('UMIRA01', miraSink));
+    await r.fleet.add(app('UMIRA01', miraSink));
     const { conversation } = createSlackSendProviders((key) => r.fleet.sendFor(key));
     assert.equal((await conversation.sendToConversation('C1', { text: 'Hallo von Mira' }, { asChannelKey: 'slack-bot:umira01' })).outcome, 'delivered');
     assert.deepEqual(miraSink.calls.map((c) => c.text), ['Hallo von Mira']);
@@ -168,8 +193,8 @@ describe('fleet', () => {
 
   test('presentIn lists the agent apps that are members of the conversation', async () => {
     const r = rig('webhook', mira);
-    r.fleet.add(app('UMIRA01', new RecordingSink(), true));
-    r.fleet.add(app('UOTTO01', new RecordingSink(), false));
+    await r.fleet.add(app('UMIRA01', new RecordingSink(), true));
+    await r.fleet.add(app('UOTTO01', new RecordingSink(), false));
     assert.deepEqual(await r.fleet.presentIn('C1'), ['slack-bot:umira01']);
   });
 });
@@ -243,5 +268,6 @@ describe('agent app webhooks', () => {
     assert.equal(await post(router, '/umira01/events', challenge, MIRA_SECRET), 200);
     assert.equal(await post(router, '/umira01/events', challenge, 'b'.repeat(32)), 401);
     assert.equal(await post(router, '/uother/events', challenge, MIRA_SECRET), 404);
+    assert.equal(await post(router, '/UMIRA01/events', challenge, MIRA_SECRET), 200, 'the member id as Slack shows it');
   });
 });
