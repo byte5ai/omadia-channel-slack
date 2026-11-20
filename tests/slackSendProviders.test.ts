@@ -141,7 +141,7 @@ test('criterion 30: a ballot posted as text is answered by a typed reply that pa
   const seen: Array<Parameters<ChatAgent['chat']>[0]> = [];
   const ev = { type: 'message', channel: 'C1', user: 'U1', text: '2', ts: '200.1', channel_type: 'channel' } as const;
   await handleSlackTurn(
-    { services: { get: () => undefined }, defaultAgent: agentReturning(answer('Danke.', MIRA), seen), outbox, log: () => undefined },
+    { route: () => undefined, defaultAgent: agentReturning(answer('Danke.', MIRA), seen), outbox, log: () => undefined },
     buildIncomingTurn('slack-1', ev, '2', 'T1'),
   );
   assert.equal(seen[0]?.userMessage, '2');
@@ -158,7 +158,7 @@ test('criterion 30: a contribution typed in plain text reaches the agent as it w
   const seen: Array<Parameters<ChatAgent['chat']>[0]> = [];
   const ev = { type: 'message', channel: 'C1', user: 'U1', text: 'Mein Beitrag: der Release sollte Freitag sein', ts: '201.1', channel_type: 'channel' } as const;
   await handleSlackTurn(
-    { services: { get: () => undefined }, defaultAgent: agentReturning(answer('Notiert.', MIRA), seen), outbox, log: () => undefined },
+    { route: () => undefined, defaultAgent: agentReturning(answer('Notiert.', MIRA), seen), outbox, log: () => undefined },
     buildIncomingTurn('slack-1', ev, ev.text, 'T1'),
   );
   assert.equal(seen[0]?.userMessage, 'Mein Beitrag: der Release sollte Freitag sein');

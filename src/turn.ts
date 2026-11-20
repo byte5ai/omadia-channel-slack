@@ -3,13 +3,14 @@ import {
   channelUserPrincipal,
   isNoReply,
   logNoReplyDrop,
+  parseAgentCommand,
   parsePrincipal,
   parseSessionScope,
   runPacedTurn,
   turnPrincipal,
   type AgentSpeaker,
-  type ChannelBindingResolver,
   type ChannelPaceProfile,
+  type ChannelRouteContext,
   type ChannelResolveResult,
   type ChatAgent,
   type IncomingTurn,
@@ -23,13 +24,12 @@ import type { SlackMessageEvent, SlackTurnMeta } from './inbound.js';
 import type { DeliveryTarget, SlackOutbox } from './outbox.js';
 import { SLACK_CHANNEL_TYPE } from './renderer.js';
 
-/** The slice of the plugin's service registry the turn path reads. */
-export interface ServiceLookup {
-  get<T>(name: string): T | undefined;
-}
-
-/** Service-registry key of the per-binding router (`CHANNEL_RESOLVER_SERVICE` in the SDK). */
-const CHANNEL_RESOLVER_SERVICE = 'channelResolver';
+/**
+ * Asks the channel resolver (`resolveChannelRoute` of the SDK, bound to the
+ * plugin context) about one key. `undefined`: the host publishes no resolver
+ * (single-Agent / Postgres-less deployment).
+ */
+export type RouteLookup = (channelKey: string, context: ChannelRouteContext) => ChannelResolveResult | undefined;
 
 /** What the channel resolver made of a turn. */
 export type AgentResolution =
@@ -53,44 +53,55 @@ export type AgentResolution =
 /** Who is asking and in which language the kernel writes its notices. */
 export interface SlackRouteContext {
   readonly principal: string;
-  readonly locale: string;
+  /** `de` / `en` when Slack states the person's language; absent otherwise (the kernel then writes German). */
+  readonly locale?: string;
 }
 
 /**
- * Per-turn Agent resolution through `channelResolver@1` (S1 contract): the
- * resolver says `bound` (the turn belongs to this agent, with its `speaker`) or
- * `reject` (no agent answers; `notice` says why). `chatAgent` is set on both:
- * on `reject` it still carries out `/agent` and `/agents`. There is no fallback
- * agent (INV-7, #1598). `channelKeys` are tried most specific first; a `bound`
- * decision wins immediately, otherwise the first rejection stands.
+ * Per-turn Agent resolution through the channel resolver (S1 contract): `bound`
+ * (the turn belongs to this agent, with its `speaker`) or `reject` (no agent
+ * answers; `notice` says why). `chatAgent` is set on both: on `reject` it still
+ * carries out `/agent` and `/agents`. There is no fallback agent (INV-7,
+ * #1598), and the `chatAgent@1` singleton never answers when a resolver is
+ * there: `defaultAgent` serves only a host WITHOUT a resolver. A resolver that
+ * throws is an error of the turn (the caller answers with a `system` notice),
+ * not a reason to ask the singleton.
  *
- * `defaultAgent` serves only a host WITHOUT the resolver (single-Agent /
- * Postgres-less deployment) or a resolver that throws, so a hiccup never
- * drops a turn. A throwing resolver is not a rejection.
+ * Keys, narrowest first: `channelKeys[0]` is the conversation key (the Slack
+ * channel). The agent selection of `/agent` lives at that key plus the
+ * principal (S1: the narrowest conversation key, never the workspace), so a
+ * workspace binding (the second key) answers ordinary turns while the
+ * `/agent` command still goes to the ChatAgent of the channel key, whoever the
+ * binding names. Only to choose that ChatAgent the SDK's `parseAgentCommand`
+ * recognises the command; the text itself is passed on untouched.
  */
 export function resolveAgentForTurn(
-  services: ServiceLookup,
+  route: RouteLookup,
   channelKeys: ReadonlyArray<string | null | undefined>,
   defaultAgent: ChatAgent,
-  route: SlackRouteContext,
+  context: SlackRouteContext,
+  text: string,
 ): AgentResolution {
-  const resolver = services.get<ChannelBindingResolver>(CHANNEL_RESOLVER_SERVICE);
-  if (!resolver) return { kind: 'agent', agent: defaultAgent };
+  const routeContext: ChannelRouteContext = {
+    principal: context.principal,
+    ...(context.locale ? { locale: context.locale } : {}),
+  };
   let rejection: { agent?: ChatAgent; notice?: SystemNotice } | undefined;
-  try {
-    for (const key of channelKeys) {
-      if (!key) continue;
-      const result = resolver.resolve(SLACK_CHANNEL_TYPE, key, { principal: route.principal, locale: route.locale });
-      if (result.decision === 'bound' && result.chatAgent) {
-        return { kind: 'agent', agent: result.chatAgent, ...(result.speaker ? { speaker: result.speaker } : {}) };
-      }
-      rejection ??= rejectionOf(result);
+  let hasResolver = false;
+  for (const key of channelKeys) {
+    if (!key) continue;
+    const result = route(key, routeContext);
+    if (!result) continue;
+    hasResolver = true;
+    if (result.decision === 'bound' && result.chatAgent) {
+      // A command belongs to the narrowest key: its selection is stored there.
+      if (rejection?.agent && parseAgentCommand(text)) return { kind: 'refused', ...rejection };
+      return { kind: 'agent', agent: result.chatAgent, ...(result.speaker ? { speaker: result.speaker } : {}) };
     }
-  } catch {
-    return { kind: 'agent', agent: defaultAgent };
+    rejection ??= rejectionOf(result);
   }
-  if (!rejection) return { kind: 'agent', agent: defaultAgent };
-  return { kind: 'refused', ...(rejection.agent ? { agent: rejection.agent } : {}), ...(rejection.notice ? { notice: rejection.notice } : {}) };
+  if (!hasResolver) return { kind: 'agent', agent: defaultAgent };
+  return { kind: 'refused', ...(rejection ?? {}) };
 }
 
 function rejectionOf(result: ChannelResolveResult): { agent?: ChatAgent; notice?: SystemNotice } {
@@ -136,7 +147,8 @@ export function slackTurnOrigin(turn: IncomingTurn, meta: SlackTurnMeta): TurnOr
 }
 
 export interface TurnDeps {
-  readonly services: ServiceLookup;
+  /** The channel resolver, bound to the plugin context (`resolveChannelRoute`). */
+  readonly route: RouteLookup;
   readonly defaultAgent: ChatAgent;
   readonly outbox: SlackOutbox;
   /** Timer seam for the pace tests; the real clock when absent. */
@@ -196,10 +208,13 @@ export async function handleSlackTurn(deps: TurnDeps, turn: IncomingTurn): Promi
   };
   const origin = slackTurnOrigin(turn, meta);
   try {
-    const resolution = resolveAgentForTurn(deps.services, [turn.conversationId, meta.teamId], deps.defaultAgent, {
-      principal: slackSenderPrincipal(turn),
-      locale: PACE_LOCALE,
-    });
+    const resolution = resolveAgentForTurn(
+      deps.route,
+      [turn.conversationId, meta.teamId],
+      deps.defaultAgent,
+      { principal: slackSenderPrincipal(turn) },
+      turn.text,
+    );
     const refusal = resolution.kind === 'refused' ? resolution : undefined;
     const agent = resolution.agent;
     if (!agent) {

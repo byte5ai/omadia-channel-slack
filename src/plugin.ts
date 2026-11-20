@@ -3,6 +3,7 @@ import { fileURLToPath } from 'node:url';
 
 import * as channelSdk from '@omadia/channel-sdk';
 import {
+  resolveChannelRoute,
   type ChatAgent,
   type ChannelHandle,
   type CoreApi,
@@ -12,6 +13,7 @@ import type { PluginContext } from '@omadia/plugin-api';
 import { createAdminRouter } from './adminRouter.js';
 import { createEventsApiRouter } from './eventsApiTransport.js';
 import { SlackOutbox } from './outbox.js';
+import { SLACK_CHANNEL_TYPE } from './renderer.js';
 import { SlackChannel } from './slackChannel.js';
 import { createSlackPeopleDirectoryProvider } from './slackPeopleDirectory.js';
 import { createSlackRosterProvider } from './slackRoster.js';
@@ -51,9 +53,11 @@ export async function activate(ctx: PluginContext, core: CoreApi): Promise<Chann
   const allowDms = ctx.config.get<boolean>('allow_dms') ?? true;
   const allowlist = parseAllowlist(ctx.config.get<string>('allowlist') ?? '');
 
-  // Resolve the orchestrator's ChatAgent. Prefers the SDK's getChatAgent()
-  // helper; falls back to the raw 'chatAgent' service lookup so the plugin
-  // still runs on a host whose channel-sdk predates the helper.
+  // The instance's singleton ChatAgent. Since S1 it answers nothing on a host
+  // WITH a channel resolver (every turn uses the agent the resolver hands out,
+  // also on `reject`); it serves only a host without one (single-agent /
+  // Postgres-less deployment). Prefers the SDK's getChatAgent() helper; falls
+  // back to the raw 'chatAgent' service lookup.
   const agent = resolveChatAgent(ctx);
   if (!agent) {
     throw new Error(
@@ -71,7 +75,7 @@ export async function activate(ctx: PluginContext, core: CoreApi): Promise<Chann
   let channel!: SlackChannel;
   let outbox!: SlackOutbox;
   const turnDeps = (): TurnDeps => ({
-    services: ctx.services,
+    route: (key, context) => resolveChannelRoute(ctx, SLACK_CHANNEL_TYPE, key, context),
     defaultAgent: agent,
     outbox,
     log: (level, message, context) => core.log(level, message, context),
