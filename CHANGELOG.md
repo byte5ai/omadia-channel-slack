@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+Bot reactions (spec 2043 §5.14, byte5ai/omadia#2061). Needs a kernel with
+`ConversationSendProvider.react` (channel-sdk 0.3.9, plugin-api 1.82.0;
+ADR 0027, byte5ai/omadia#2151); an older kernel never calls it.
+
+- **The conversation provider reacts**: it declares `supports.reactions` and
+  implements `react`, which sets a thumbs-up (`+1`) through `reactions.add`
+  on the message the inbound event reported (channel id + `ts`), as exactly
+  the app `asChannelKey` names. A missing or unknown key is refused
+  (`not_permitted`), never set through another app. `already_reacted` counts
+  as reacted; Slack errors are returned with Slack's message (`not_permitted`
+  for a missing scope, archived or unknown channel, `no_permission`,
+  `thread_locked`, `not_reactable`; otherwise `channel_error`), never thrown.
+- **Optional bot scope `reactions:write`** again, now only for this kernel
+  reaction. There is still no receipt reaction.
+
 ## 0.4.0
 
 An agent's own Slack app (byte5ai/omadia#2042, spec §5.3, §8 item 20). Needs

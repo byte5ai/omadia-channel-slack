@@ -80,7 +80,8 @@ setup:
       `channels:read`, `groups:read`, `im:read`, `mpim:read`
       (the four `*:read` scopes let the bot read who is in a conversation: in
       channels and group chats agents answer only when the member list is known;
-      optional: `users:read.email`, so the Conductor people picker can show and match e-mail addresses).
+      optional: `users:read.email`, so the Conductor people picker can show and match e-mail addresses;
+      optional: `reactions:write`, so a facilitating agent acknowledges a contribution with a 👍 instead of a reply).
 
       ### 3. Install & get the bot token
       1. At the top, click **Install to Workspace** → **Allow**.
@@ -137,7 +138,8 @@ setup:
       `channels:read`, `groups:read`, `im:read`, `mpim:read`
       (die vier `*:read`-Scopes lassen den Bot lesen, wer in einer Unterhaltung ist: in
       Channels und Gruppenchats antworten Agenten nur, wenn die Mitgliederliste bekannt ist;
-      optional: `users:read.email`, damit die Personensuche der Conductor-Schritte E-Mail-Adressen zeigt und abgleicht).
+      optional: `users:read.email`, damit die Personensuche der Conductor-Schritte E-Mail-Adressen zeigt und abgleicht;
+      optional: `reactions:write`, damit ein moderierender Agent einen Beitrag mit 👍 bestätigt statt mit einer Antwort).
 
       ### 3. Installieren & Bot-Token holen
       1. Oben auf **Install to Workspace** → **Allow**.
@@ -181,7 +183,7 @@ setup:
     - key: "bot_token"
       type: "secret"
       label: "Bot User OAuth Token (xoxb-…)"
-      help: "OAuth & Permissions → Bot User OAuth Token. Benötigte Bot-Scopes: app_mentions:read, chat:write, im:history, channels:history, groups:history, mpim:history, users:read, channels:read, groups:read, im:read, mpim:read (optional users:read.email für die Personensuche). Die *:read-Scopes liefern die Mitgliederliste; ohne sie antwortet der Bot in Gruppen nicht."
+      help: "OAuth & Permissions → Bot User OAuth Token. Benötigte Bot-Scopes: app_mentions:read, chat:write, im:history, channels:history, groups:history, mpim:history, users:read, channels:read, groups:read, im:read, mpim:read (optional users:read.email für die Personensuche, reactions:write für die 👍-Bestätigung von Beiträgen). Die *:read-Scopes liefern die Mitgliederliste; ohne sie antwortet der Bot in Gruppen nicht."
       required: true
 
     - key: "public_base_url"

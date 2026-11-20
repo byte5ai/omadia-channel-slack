@@ -1,4 +1,6 @@
+import type { ConversationReaction } from '@omadia/plugin-api';
 import type {
+  ConversationReactionOutcome,
   ConversationSendOptions,
   ConversationSendProvider,
   SendProviderCapabilities,
@@ -23,6 +25,18 @@ export interface SlackUserLookup {
   userIdByEmail(email: string): Promise<string | undefined>;
 }
 
+/** What the providers need to set a reaction as one Slack app. */
+export interface SlackReactor {
+  /** `reactions.add` on the message `timestamp` of `channel` (bot scope `reactions:write`). Throws the Web API error. */
+  addReaction(channel: string, timestamp: string, name: string): Promise<void>;
+}
+
+/**
+ * The Slack emoji name of each kernel reaction (spec 2043 §5.14): `+1` is
+ * Slack's thumbs-up (`:+1:`, alias `:thumbsup:`).
+ */
+export const SLACK_REACTION_NAMES: Readonly<Record<ConversationReaction, string>> = Object.freeze({ acknowledge: '+1' });
+
 /**
  * Capabilities Slack declares: `asChannelKey` (the post goes out through
  * exactly the Slack app that key names, `slack-bot:<member id>`: the
@@ -33,10 +47,20 @@ export interface SlackUserLookup {
  */
 export const SLACK_SEND_CAPABILITIES: SendProviderCapabilities = Object.freeze({ mentions: true, asChannelKey: true });
 
+/**
+ * The conversation provider also sets reactions (`react`, spec 2043 §5.14):
+ * a thumbs-up on a person's message, as exactly the app `asChannelKey` names.
+ */
+export const SLACK_CONVERSATION_CAPABILITIES: SendProviderCapabilities = Object.freeze({
+  ...SLACK_SEND_CAPABILITIES,
+  reactions: true,
+});
+
 /** One Slack app the providers can post as. */
 export interface SlackSendBot {
   readonly outbox: SlackOutbox;
   readonly users: SlackUserLookup;
+  readonly reactions: SlackReactor;
 }
 
 /**
@@ -70,6 +94,23 @@ function failure(err: unknown): Unreachable {
     return unreachable('not_permitted', message);
   }
   return unreachable('channel_error', message);
+}
+
+/** Slack errors of `reactions.add` that mean "this app may not react there" (docs.slack.dev/reference/methods/reactions.add). */
+const REACTION_NOT_PERMITTED = new Set(['no_permission', 'thread_locked', 'not_reactable']);
+
+/**
+ * The outcome of a failed `reactions.add`: `already_reacted` is the goal
+ * reached (the app's thumbs-up is there), everything else is unreachable
+ * with Slack's own message.
+ */
+function reactionFailure(err: unknown): ConversationReactionOutcome {
+  const code = slackErrorCode(err);
+  if (code === 'already_reacted') return { outcome: 'reacted' };
+  if (code !== undefined && REACTION_NOT_PERMITTED.has(code)) {
+    return unreachable('not_permitted', err instanceof Error ? err.message : String(err));
+  }
+  return failure(err);
 }
 
 /** The text of a proactive message: mentions as Slack member mentions, attachments as plain links. */
@@ -157,14 +198,44 @@ export function createSlackSendProviders(lookup: SlackBotLookup): SlackSendProvi
     },
   };
 
+  /**
+   * A reaction on a person's message: `conversationId` is the Slack channel id
+   * and `messageId` the message `ts`, as the inbound `created` event reported
+   * them. Only as the app `asChannelKey` names; no key, an unknown key or an
+   * unknown reaction is refused, never set through another app.
+   */
+  const react = async (
+    conversationId: string,
+    messageId: string,
+    reaction: ConversationReaction,
+    reactOpts: { asChannelKey: string },
+  ): Promise<ConversationReactionOutcome> => {
+    const key = typeof reactOpts?.asChannelKey === 'string' ? reactOpts.asChannelKey.trim() : '';
+    if (key.length === 0) return unreachable('not_permitted', 'a reaction needs the Slack app it is set as; nothing was set');
+    const bot = botFor(key);
+    if (!isBot(bot)) return bot;
+    const name = Object.hasOwn(SLACK_REACTION_NAMES, reaction) ? SLACK_REACTION_NAMES[reaction] : undefined;
+    if (!name) return unreachable('channel_error', `Slack has no reaction '${String(reaction)}'`);
+    if (!conversationId?.trim() || !messageId?.trim()) {
+      return unreachable('channel_error', 'a reaction needs the Slack channel and the message ts');
+    }
+    try {
+      await bot.reactions.addReaction(conversationId.trim(), messageId.trim(), name);
+      return { outcome: 'reacted' };
+    } catch (err) {
+      return reactionFailure(err);
+    }
+  };
+
   const conversation: ConversationSendProvider = {
     channelType: SLACK_CHANNEL_TYPE,
-    supports: SLACK_SEND_CAPABILITIES,
+    supports: SLACK_CONVERSATION_CAPABILITIES,
     sendToConversation(conversationId: string, message: TargetedMessage, sendOpts?: ConversationSendOptions) {
       const bot = botFor(sendOpts?.asChannelKey);
       if (!isBot(bot)) return Promise.resolve(bot);
       return post(bot, conversationId, message);
     },
+    react,
   };
 
   return { targeted, conversation };

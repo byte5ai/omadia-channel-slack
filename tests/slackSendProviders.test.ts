@@ -4,7 +4,13 @@ import { test } from 'node:test';
 import { parseCardReply, renderCardAsText, type ChatAgent, type QuestionCard } from '@omadia/channel-sdk';
 
 import { SlackOutbox } from '../src/outbox.js';
-import { SLACK_SEND_CAPABILITIES, createSlackSendProviders, proactiveText } from '../src/slackSendProviders.js';
+import {
+  SLACK_CONVERSATION_CAPABILITIES,
+  SLACK_SEND_CAPABILITIES,
+  createSlackSendProviders,
+  proactiveText,
+  type SlackReactor,
+} from '../src/slackSendProviders.js';
 import { buildIncomingTurn } from '../src/inbound.js';
 import { handleSlackTurn } from '../src/turn.js';
 import { MIRA, RecordingSink, SpyOutbox, agentReturning, answer } from './helpers.js';
@@ -26,20 +32,36 @@ const BALLOT: QuestionCard = {
 } as unknown as QuestionCard;
 
 const OWN_KEY = 'slack-bot:ubot';
+const AGENT_KEY = 'slack-bot:uagent';
+
+type ReactionCall = { channel: string; timestamp: string; name: string };
+
+/** Records `reactions.add` calls; `fail` makes it throw a Web API error the way @slack/web-api does. */
+class RecordingReactor implements SlackReactor {
+  readonly calls: ReactionCall[] = [];
+  constructor(private readonly fail?: string) {}
+  async addReaction(channel: string, timestamp: string, name: string): Promise<void> {
+    this.calls.push({ channel, timestamp, name });
+    if (this.fail) throw Object.assign(new Error(`An API error occurred: ${this.fail}`), { data: { ok: false, error: this.fail } });
+  }
+}
 
 function setup(users: { userIdByEmail(email: string): Promise<string | undefined> } = { userIdByEmail: async () => undefined }) {
   const sink = new RecordingSink();
   const outbox = new SlackOutbox(sink);
   // One app: no key and its own key name it, nothing else does.
-  const bot = { outbox, users };
+  const bot = { outbox, users, reactions: new RecordingReactor() };
   const providers = createSlackSendProviders((key) => (key === undefined || key === OWN_KEY ? bot : undefined));
-  return { sink, providers };
+  return { sink, providers, reactor: bot.reactions };
 }
 
-test('the providers declare mentions and the named identity: no poll, no card', () => {
+test('the providers declare mentions and the named identity: no poll, no card; the conversation provider reacts', () => {
   const { providers } = setup();
   assert.deepEqual(providers.targeted.supports, { mentions: true, asChannelKey: true });
-  assert.equal(providers.conversation.supports, SLACK_SEND_CAPABILITIES);
+  assert.equal(providers.targeted.supports, SLACK_SEND_CAPABILITIES);
+  assert.deepEqual(providers.conversation.supports, { mentions: true, asChannelKey: true, reactions: true });
+  assert.equal(providers.conversation.supports, SLACK_CONVERSATION_CAPABILITIES);
+  assert.equal(typeof providers.conversation.react, 'function');
   assert.equal(providers.targeted.channelType, 'slack');
   assert.equal(providers.conversation.channelType, 'slack');
 });
@@ -171,4 +193,89 @@ test('criterion 30: a contribution typed in plain text reaches the agent as it w
   );
   assert.equal(seen[0]?.userMessage, 'Mein Beitrag: der Release sollte Freitag sein');
   assert.deepEqual(outbox.sink.calls.map((c) => c.text), ['Notiert.']);
+});
+
+// Spec 2043 §5.14: the facilitator acknowledges a contribution with a thumbs-up instead of an echo.
+test('react: a thumbs-up (`+1`) on the message ts of the channel, as the named app, nothing posted', async () => {
+  const { sink, providers, reactor } = setup();
+  const out = await providers.conversation.react?.('C9', '1701.000200', 'acknowledge', { asChannelKey: 'SLACK-BOT:UBOT' });
+  assert.deepEqual(out, { outcome: 'reacted' });
+  assert.deepEqual(reactor.calls, [{ channel: 'C9', timestamp: '1701.000200', name: '+1' }]);
+  assert.equal(sink.calls.length, 0);
+});
+
+test('react: each app reacts as itself; an unknown or missing key is refused, never set through another app', async () => {
+  const own = new RecordingReactor();
+  const agent = new RecordingReactor();
+  const users = { userIdByEmail: async () => undefined };
+  const bots = new Map([
+    [OWN_KEY, { outbox: new SlackOutbox(new RecordingSink()), users, reactions: own }],
+    [AGENT_KEY, { outbox: new SlackOutbox(new RecordingSink(), undefined, true), users, reactions: agent }],
+  ]);
+  const providers = createSlackSendProviders((key) => (key === undefined ? bots.get(OWN_KEY) : bots.get(key)));
+  const react = providers.conversation.react!;
+  assert.deepEqual(await react('C1', '1.1', 'acknowledge', { asChannelKey: AGENT_KEY }), { outcome: 'reacted' });
+  assert.equal(agent.calls.length, 1);
+  assert.equal(own.calls.length, 0);
+
+  const unknown = await react('C1', '1.1', 'acknowledge', { asChannelKey: 'slack-bot:unobody' });
+  const missing = await react('C1', '1.1', 'acknowledge', undefined as never);
+  const blank = await react('C1', '1.1', 'acknowledge', { asChannelKey: '  ' });
+  for (const out of [unknown, missing, blank]) {
+    assert.equal(out.outcome, 'unreachable');
+    assert.equal(out.outcome === 'unreachable' && out.code, 'not_permitted');
+  }
+  assert.equal(own.calls.length, 0, 'never through the shared app');
+  assert.equal(agent.calls.length, 1);
+});
+
+test('react: already_reacted is the goal reached', async () => {
+  const reactions = new RecordingReactor('already_reacted');
+  const providers = createSlackSendProviders(() => ({ outbox: new SlackOutbox(new RecordingSink()), users: { userIdByEmail: async () => undefined }, reactions }));
+  assert.deepEqual(await providers.conversation.react?.('C1', '1.1', 'acknowledge', { asChannelKey: OWN_KEY }), { outcome: 'reacted' });
+});
+
+test('react: Slack errors are returned with Slack\'s message, never thrown', async () => {
+  const codeFor = async (error: string): Promise<{ code: string; message: string } | undefined> => {
+    const reactions = new RecordingReactor(error);
+    const providers = createSlackSendProviders(() => ({ outbox: new SlackOutbox(new RecordingSink()), users: { userIdByEmail: async () => undefined }, reactions }));
+    const out = await providers.conversation.react!('C1', '1.1', 'acknowledge', { asChannelKey: OWN_KEY });
+    return out.outcome === 'unreachable' ? { code: out.code, message: out.message } : undefined;
+  };
+  assert.deepEqual(await codeFor('message_not_found'), { code: 'channel_error', message: 'An API error occurred: message_not_found' });
+  assert.equal((await codeFor('ratelimited'))?.code, 'channel_error');
+  assert.equal((await codeFor('too_many_reactions'))?.code, 'channel_error');
+  for (const refused of ['missing_scope', 'channel_not_found', 'is_archived', 'no_permission', 'thread_locked', 'not_reactable']) {
+    assert.equal((await codeFor(refused))?.code, 'not_permitted', refused);
+  }
+  // A non-API error (network) is a channel error too.
+  const providers = createSlackSendProviders(() => ({
+    outbox: new SlackOutbox(new RecordingSink()),
+    users: { userIdByEmail: async () => undefined },
+    reactions: { addReaction: async () => { throw new Error('socket hang up'); } },
+  }));
+  assert.deepEqual(await providers.conversation.react!('C1', '1.1', 'acknowledge', { asChannelKey: OWN_KEY }), {
+    outcome: 'unreachable', code: 'channel_error', message: 'socket hang up',
+  });
+});
+
+test('react: an unknown reaction or a missing message address is refused without calling Slack', async () => {
+  const { providers, reactor } = setup();
+  const react = providers.conversation.react!;
+  const outs = [
+    await react('C1', '1.1', 'party' as never, { asChannelKey: OWN_KEY }),
+    await react('C1', '1.1', 'toString' as never, { asChannelKey: OWN_KEY }),
+    await react('', '1.1', 'acknowledge', { asChannelKey: OWN_KEY }),
+    await react('C1', ' ', 'acknowledge', { asChannelKey: OWN_KEY }),
+  ];
+  for (const out of outs) assert.equal(out.outcome === 'unreachable' && out.code, 'channel_error');
+  assert.equal(reactor.calls.length, 0);
+});
+
+test('react addresses the message the inbound event reported: channel id + ts', async () => {
+  const { providers, reactor } = setup();
+  const ev = { type: 'message', channel: 'C42', user: 'U1', text: 'Mein Beitrag', ts: '1701.000300', channel_type: 'channel' } as const;
+  const turn = buildIncomingTurn('slack-1', ev, ev.text, 'T1');
+  await providers.conversation.react!(turn.conversationId, ev.ts, 'acknowledge', { asChannelKey: OWN_KEY });
+  assert.deepEqual(reactor.calls, [{ channel: 'C42', timestamp: '1701.000300', name: '+1' }]);
 });

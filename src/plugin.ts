@@ -130,7 +130,7 @@ export async function activate(ctx: PluginContext, core: CoreApi): Promise<Chann
     });
     outbox = new SlackOutbox(channel, undefined, agentBot);
     const roster = createSlackRosterProvider({ channel, log: (m) => core.log('warn', m) });
-    return { channel, outbox, roster, send: { outbox, users: channel } };
+    return { channel, outbox, roster, send: { outbox, users: channel, reactions: channel } };
   };
 
   const own = buildApp(botToken, false);
