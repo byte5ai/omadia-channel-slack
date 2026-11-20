@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { afterEach, test } from 'node:test';
+import { afterEach, mock, test } from 'node:test';
 
 import type { ConversationMessageEvent, IncomingTurn } from '@omadia/channel-sdk';
 
@@ -14,14 +14,15 @@ type InfoCall = { user: string; include_locale?: boolean };
 function make(
   policy: Partial<AccessPolicy> = {},
   info: (args: InfoCall) => Promise<unknown> = async () => ({ user: {} }),
-  extra: Partial<Pick<SlackChannelDeps, 'emitMessage' | 'deliveryOf'>> = {},
+  extra: Partial<Pick<SlackChannelDeps, 'emitMessage' | 'reportMessage' | 'deliveryOf'>> = {},
 ) {
   const turns: IncomingTurn[] = [];
+  const logs: string[] = [];
   const reactions: unknown[] = [];
   const channel = new SlackChannel({
     channelId: 'slack-1',
     botToken: 'xoxb-test',
-    log: () => undefined,
+    log: (level, message) => void logs.push(`${level}: ${message}`),
     state: createChannelState(),
     policy: { respondInChannels: 'mention', allowDms: true, allowlist: new Set(), ...policy },
     onMessage: async (t) => void turns.push(t),
@@ -35,7 +36,7 @@ function make(
   // users.info is the sender profile lookup: never let a test reach Slack.
   const infoCalls: InfoCall[] = [];
   (web as unknown as { users: { info: (a: InfoCall) => Promise<unknown> } }).users.info = async (a) => (infoCalls.push(a), info(a));
-  return { channel, turns, reactions, infoCalls };
+  return { channel, turns, reactions, infoCalls, logs };
 }
 
 const command = (over: Partial<SlackSlashCommandPayload> = {}): SlackSlashCommandPayload => ({
@@ -220,4 +221,77 @@ test('a DM is emitted as a direct conversation', async () => {
   const { channel, events } = emitting();
   await channel.ingest({ type: 'message', channel: 'D1', user: 'U1', text: '1', ts: '1.1', channel_type: 'im' }, 'T1');
   assert.equal(events[0]?.conversationType, 'direct');
+});
+
+type Verdict = { answeredCard: boolean };
+const MENTION = { type: 'app_mention', channel: 'C1', user: 'U1', text: '<@UBOT> 2', ts: '400.2', thread_ts: '400.1', channel_type: 'channel' } as const;
+
+function reporting(report: (e: ConversationMessageEvent) => Promise<Verdict>, policy: Partial<AccessPolicy> = {}) {
+  const reported: ConversationMessageEvent[] = [];
+  const emitted: ConversationMessageEvent[] = [];
+  const made = make(policy, undefined, {
+    reportMessage: async (e) => (reported.push(e), report(e)),
+    emitMessage: (e) => void emitted.push(e),
+  });
+  return { ...made, reported, emitted };
+}
+
+test('a message the kernel consumed as the answer to an open question starts no turn', async () => {
+  const { channel, turns, reported, emitted } = reporting(async () => ({ answeredCard: true }));
+  await channel.ingest(MENTION, 'T1');
+  assert.equal(turns.length, 0);
+  assert.equal(reported.length, 1);
+  assert.equal(reported[0]?.replyToMessageId, '400.1');
+  assert.equal(emitted.length, 0, 'reported, not emitted twice');
+});
+
+test('a message the kernel did not consume starts the turn as before', async () => {
+  const { channel, turns, reported } = reporting(async () => ({ answeredCard: false }));
+  await channel.ingest(MENTION, 'T1');
+  assert.equal(reported.length, 1);
+  assert.equal(turns.length, 1);
+});
+
+test('a failing report is logged and the turn runs (never thrown)', async () => {
+  const { channel, turns, logs } = reporting(async () => { throw new Error('kernel down'); });
+  await channel.ingest(MENTION, 'T1');
+  assert.equal(turns.length, 1);
+  assert.ok(logs.some((l) => /report failed/.test(l)));
+});
+
+test('a report that takes too long never holds the turn: it runs after the timeout, answeredCard unknown = false', async () => {
+  mock.timers.enable({ apis: ['setTimeout'] });
+  try {
+    const { channel, turns, logs } = reporting(() => new Promise<Verdict>(() => undefined));
+    const done = channel.ingest(MENTION, 'T1');
+    for (let i = 0; i < 5; i += 1) await Promise.resolve();
+    assert.equal(turns.length, 0, 'still waiting inside the timeout');
+    mock.timers.tick(1_500);
+    await done;
+    assert.equal(turns.length, 1);
+    assert.ok(logs.some((l) => /timed out/.test(l)));
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+test('without reportConversationMessage the message is emitted and the turn runs as before', async () => {
+  const { channel, turns, events } = emitting();
+  await channel.ingest(MENTION, 'T1');
+  assert.equal(events.length, 1);
+  assert.equal(turns.length, 1);
+});
+
+test('a message that starts no turn is not held for a verdict: it is emitted fire-and-forget', async () => {
+  const { channel, turns, emitted, reported } = reporting(() => new Promise<Verdict>(() => undefined));
+  await channel.ingest({ type: 'message', channel: 'C1', user: 'U2', text: '2', ts: '1.5', thread_ts: '1.1', channel_type: 'channel' }, 'T1');
+  assert.equal(turns.length, 0);
+  assert.equal(emitted.length, 1);
+  assert.equal(reported.length, 0);
+});
+
+test('a DM is a turn case too: a consumed typed answer in a DM starts no turn', async () => {
+  const { channel, turns } = reporting(async () => ({ answeredCard: true }));
+  await channel.ingest({ type: 'message', channel: 'D1', user: 'U1', text: '1', ts: '2.2', channel_type: 'im' }, 'T1');
+  assert.equal(turns.length, 0);
 });

@@ -66,6 +66,11 @@ omadia#2045 / #2086 / #2087 (S6 branch): do not publish before the kernel is liv
   (no binding key per bot in the contract yet). Not emitted for slash
   commands, disabled DMs, channels outside the allowlist. The conversation
   send provider returns the Slack `ts` as `messageId`.
+- **No double turn for a typed answer** (kernel 28da9b54a): a message that
+  would start a turn goes through `core.reportConversationMessage` first
+  (feature-detected, 1.5 s timeout, errors logged); `answeredCard: true` means
+  no turn (no acknowledgement, no agent answer). Timeout, error or an older
+  kernel: emit and turn as before.
 - **Send providers**: `TargetedSendProvider` (DM by member id,
   `user:slack-user:<id>` or e-mail via `users.lookupByEmail`, scope
   `users:read.email`) and `ConversationSendProvider`, registered when the

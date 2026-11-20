@@ -91,6 +91,9 @@ export async function activate(ctx: PluginContext, core: CoreApi): Promise<Chann
     ...(core.emitConversationMessage
       ? { emitMessage: (event) => core.emitConversationMessage?.(event) }
       : {}),
+    ...(core.reportConversationMessage
+      ? { reportMessage: (event) => core.reportConversationMessage?.(event) ?? Promise.resolve({ answeredCard: false }) }
+      : {}),
     ...(core.conversationDelivery
       ? {
           deliveryOf: (conversationId, channelKey) =>

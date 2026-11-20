@@ -41,6 +41,13 @@ export interface SlackChannelDeps {
    * kernel stores it only for a subscribed conversation and drops it otherwise.
    */
   emitMessage?: (event: ConversationMessageEvent) => void;
+  /**
+   * `core.reportConversationMessage`: like `emitMessage`, but says whether the
+   * kernel took the message as the typed answer to an open question
+   * (`answeredCard`); then the message starts no turn. Absent on an older
+   * kernel: `emitMessage` and the turn run as before.
+   */
+  reportMessage?: (event: ConversationMessageEvent) => Promise<{ answeredCard: boolean }>;
   /** `core.conversationDelivery`: what the bot identity is handed of a conversation. Absent: emit. */
   deliveryOf?: (conversationId: string, channelKey: string) => 'all' | 'addressed' | 'none';
 }
@@ -73,6 +80,9 @@ const PROFILE_TTL_MS = 60 * 60 * 1000;
 const PROFILE_FAILURE_TTL_MS = 60 * 1000;
 const PROFILE_TIMEOUT_MS = 1_500;
 const PROFILE_CACHE_MAX = 2_000;
+
+/** The kernel's verdict on a message that would start a turn must never hold the turn longer than this. */
+const REPORT_TIMEOUT_MS = 1_500;
 
 /** `conversations.members` page size (Slack allows up to 1000; 200 is the documented default). */
 const MEMBERS_PAGE_SIZE = 200;
@@ -176,8 +186,18 @@ export class SlackChannel implements SlackSink {
       // The kernel's message record sees every human message of a conversation
       // it moderates, also one that does not mention the bot (a typed answer to
       // a poll). It is no turn: the mention gate below still decides on that.
-      if (!source.command && !(isDm && !this.deps.policy.allowDms) && this.isAllowlisted(event)) {
-        await this.emitCreated(event, teamId);
+      // A message that WOULD start a turn waits (briefly) for the kernel's
+      // verdict: taken as the answer to an open question, it starts no turn.
+      const dmOff = isDm && !this.deps.policy.allowDms;
+      const allowlisted = this.isAllowlisted(event);
+      if (!source.command && !dmOff && allowlisted) {
+        const startsTurn = isMention || isDm || this.deps.policy.respondInChannels === 'all';
+        if (await this.emitCreated(event, teamId, startsTurn)) {
+          this.deps.log('info', 'Slack message consumed as the answer to an open question: no turn', {
+            channel: event.channel,
+          });
+          return;
+        }
       }
 
       // Access policy. An explicit @mention (or slash command) always passes
@@ -277,12 +297,18 @@ export class SlackChannel implements SlackSink {
    * `addressedToBot`. Needs `emitMessage` and the bot's own id (after `init`);
    * skipped when the kernel says the bot is handed nothing of this conversation.
    * Never fails the turn.
+   *
+   * `awaitVerdict`: the message would start a turn, so ask the kernel
+   * (`reportMessage`) whether it consumed the message as a typed answer and
+   * wait at most {@link REPORT_TIMEOUT_MS}; a timeout or error means "not
+   * consumed" and the turn runs as before. Returns `true` only for a consumed
+   * message. Without `reportMessage` it is `emitMessage`, fire-and-forget.
    */
-  private async emitCreated(event: SlackMessageEvent, teamId: string | undefined): Promise<void> {
-    const { emitMessage, deliveryOf } = this.deps;
-    if (!emitMessage || !this.botUserId || !event.user) return;
+  private async emitCreated(event: SlackMessageEvent, teamId: string | undefined, awaitVerdict: boolean): Promise<boolean> {
+    const { emitMessage, reportMessage, deliveryOf } = this.deps;
+    if ((!emitMessage && !reportMessage) || !this.botUserId || !event.user) return false;
     const receivedByChannelKey = slackBotChannelKey(this.botUserId);
-    if (deliveryOf?.(event.channel, receivedByChannelKey) === 'none') return;
+    if (deliveryOf?.(event.channel, receivedByChannelKey) === 'none') return false;
     try {
       const raw = extractText(event);
       const text = raw ? stripMention(raw, this.botUserId) : undefined;
@@ -290,7 +316,7 @@ export class SlackChannel implements SlackSink {
       const profile = deliveryOf ? await this.senderProfile(event.user) : {};
       const mentionsBot = event.type === 'app_mention' || (raw?.includes(`<@${this.botUserId}`) ?? false);
       const occurredAt = new Date(Number.parseFloat(event.ts) * 1000);
-      emitMessage({
+      const message: ConversationMessageEvent = {
         channelId: this.deps.channelId,
         channelType: 'slack',
         conversationId: event.channel,
@@ -305,9 +331,36 @@ export class SlackChannel implements SlackSink {
         ...(event.thread_ts && event.thread_ts !== event.ts ? { replyToMessageId: event.thread_ts } : {}),
         ...(mentionsBot ? { addressedToBot: true } : {}),
         occurredAt: Number.isFinite(occurredAt.getTime()) ? occurredAt.toISOString() : new Date().toISOString(),
-      });
+      };
+      if (awaitVerdict && reportMessage) return await this.verdict(reportMessage, message);
+      if (emitMessage) emitMessage(message);
+      else void reportMessage?.(message).catch((err: unknown) => this.deps.log('warn', 'Slack message report failed', { error: errMessage(err) }));
+      return false;
     } catch (err) {
       this.deps.log('warn', 'Slack message event not emitted', { error: errMessage(err) });
+      return false;
+    }
+  }
+
+  /** The kernel's verdict within {@link REPORT_TIMEOUT_MS}; unknown (late, failed) is `false`. */
+  private async verdict(
+    report: NonNullable<SlackChannelDeps['reportMessage']>,
+    message: ConversationMessageEvent,
+  ): Promise<boolean> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const timeout = new Promise<{ answeredCard: false }>((resolve) => {
+        timer = setTimeout(() => {
+          this.deps.log('warn', 'Slack message report timed out: the turn runs as usual', { channel: message.conversationId });
+          resolve({ answeredCard: false });
+        }, REPORT_TIMEOUT_MS);
+      });
+      return (await Promise.race([report(message), timeout])).answeredCard === true;
+    } catch (err) {
+      this.deps.log('warn', 'Slack message report failed: the turn runs as usual', { error: errMessage(err) });
+      return false;
+    } finally {
+      if (timer) clearTimeout(timer);
     }
   }
 
