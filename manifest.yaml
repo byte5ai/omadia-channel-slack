@@ -34,7 +34,7 @@ identity:
     - "communication"
 
 compat:
-  core: ">=1.76.0 <2.0"                    # placeholder: S6 lands with plugin-api 1.76.0; the parent session confirms the number before publish
+  core: ">=1.75.0 <2.0"                    # placeholder: S6 lands with plugin-api 1.75.0; the parent session confirms the number before publish
   node: ">=20"
 
 depends_on: []

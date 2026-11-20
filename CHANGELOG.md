@@ -29,8 +29,8 @@ omadia#2045 / #2086 / #2087 (S6 branch): do not publish before the kernel is liv
   `{ principal, locale }`. **Behaviour change:** a `reject` from the resolver
   is now answered with the kernel's `system` notice (or a short "no agent set
   up" text) and never by the default agent (INV-7, #1598).
-- **S1 resolver contract** (kernel `135a14dbe`, needs core `>=1.76.0`):
-  `compat.core` is `>=1.76.0 <2.0` (placeholder; the parent session sets the
+- **S1 resolver contract** (kernel `135a14dbe`, needs core `>=1.75.0`):
+  `compat.core` is `>=1.75.0 <2.0` (placeholder; the parent session sets the
   final range at landing). The resolver result is `bound | reject`, `chatAgent`
   always set (the old `fallback` decision is gone). On `reject` the text still
   reaches that ChatAgent (it carries out `/agent`, `/agents`) and only a
