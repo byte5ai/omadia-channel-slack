@@ -39,6 +39,28 @@ Ein Channel-Plugin (`kind: channel`). Der omadia-Kernel aktiviert es aus der `ma
 2. Trage die Setup-Felder unten ein. Für dieses Plugin gibt es keinen API-Key.
 3. Weise dem Orchestrator zuerst einen LLM-Provider zu, damit der Chat-Agent ein Modell hat, auf dem er läuft.
 
+## Agenten in Slack
+
+**Ansprechen.** Dieses Plugin betreibt **eine Slack-App pro Installation**: ein Bot-Token, ein Bot-Name, ein Avatar. Der Sprecher zeigt sich deshalb nicht über die Plattform, und mehrere Agenten im selben Slack erreichst du mit dem nativen Befehl **`/agent`**:
+
+- `/agent Mira` wählt Mira für dich in dieser Unterhaltung, `/agent` hebt deine Auswahl auf, `/agents` listet die Agenten, die dir hier zur Verfügung stehen.
+- Das Plugin leitet nur den Text weiter. Der omadia-Kernel speichert die Auswahl pro Person und Unterhaltung, prüft die Verfügbarkeit und antwortet mit einer kurzen System-Meldung, die nur du siehst (ephemere Nachricht).
+- Slack erlaubt keine Slash-Commands in Threads. Schreibe dort `@DeinBot /agent Mira`, das wird genauso behandelt.
+- Lege den Befehl in deiner Slack-App an (**Slash Commands**): `/agent`, Request URL `<public_base_url>/api/slack/commands` (Events API) oder keine URL (Socket Mode). Siehe die Setup-Anleitung.
+
+**Eigene Identität pro Agent: von diesem Plugin nicht unterstützt.** Slack selbst kann es: eine Slack-App pro Agent gibt jedem eigenen Namen, Avatar und eine eigene `@Erwähnung`. `chat:write.customize` ändert nur Name und Avatar je Nachricht und ist keine ansprechbare Identität, deshalb wird es nicht benutzt. Eine Plugin-Installation hält genau einen Token-Satz (Bot-Token, Signing Secret bzw. App-Level-Token); App-pro-Agent bräuchte also eine Installation je App, und der Kernel kennt noch keinen Channel-Schlüssel für eine Slack-Bot-Identität, mit dem er so einen Bot an seinen Agenten bindet. Was es dich pro Agent kosten würde: eine Slack-App anlegen und pflegen, ihre Scopes, Request URL bzw. App-Level-Token, im Workspace installieren und in Channels einladen. Bis dahin: `/agent`.
+
+**So sehen Antworten aus.** Wie die Nachricht eines Kollegen: keine Statuszeile, kein Chip, keine Fußzeile, keine Buttons, keine Folgefragen-Liste.
+
+- Ein Agent in der Unterhaltung: keine Namenszeile. Mehrere Agenten: eine schlichte Zeile `Name:`, wo der Sprecher sonst unklar wäre. Die Sprecher-Historie liegt im Speicher; nach einem Neustart wird eine Unterhaltung ab dem zweiten Sprecher wieder als Mehr-Agenten-Unterhaltung erkannt.
+- Was ein befragter Kollege beigetragen hat, steht als Klartext (`Mira: ...`).
+- Meldungen des Systems (zum Beispiel „dieser Agent ist für dich nicht verfügbar") sind eigener Klartext, nie unter dem Namen eines Agenten.
+- Auswahlfragen werden zu einer nummerierten Liste im Text.
+- Die KI-Kennzeichnung ist Teil des Antworttextes und folgt der Häufigkeits-Einstellung des Betreibers.
+- Es gibt **keine Empfangsbestätigung per Reaktion** mehr (das frühere Augen-Emoji) und keinen Tipp-Indikator: Slack bietet einem Bot außerhalb der KI-Assistenten-Oberfläche keinen. Bei langer Arbeit bestätigt der Agent nach 8 Sekunden einmal („ich kümmere mich darum") und antwortet dann. Ein Slash-Command, der seine 30-Minuten-`response_url` überlebt, wird als ephemere Folgenachricht beantwortet.
+
+**Gruppen.** Der Bot liest, wer in einem Channel oder Gruppenchat ist (`conversations.members`), und gibt dem Kernel eine ehrliche Teilnehmerliste (vollständig, teilweise oder unbekannt). Die Zielgruppen-Prüfung des Kernels braucht sie: ohne Liste antwortet ein Agent in einer Gruppe nicht. Ergänze die Bot-Scopes `channels:read`, `groups:read`, `im:read` und `mpim:read`. Ein fehlender Scope erscheint im Log als „Liste unbekannt", nicht als Raten.
+
 ## Konfiguration
 
 | Feld | Hinweis |
@@ -58,10 +80,10 @@ Nutze für die Produktion den Events-API-Transport. Socket Mode funktioniert ohn
 ```bash
 npm install
 npm run build   # tsc, schreibt dist/
-npm test        # prüft manifest.yaml gegen die Core-Invarianten
+npm test        # node:test über esbuild; braucht das gebaute Channel-SDK eines omadia-Checkouts
 ```
 
-`@omadia/plugin-api` stellt der omadia-Host zur Laufzeit bereit (optionale Peer-Dep). Verlinke es aus einem lokalen omadia-Checkout zum Bauen. Aufbau siehe [byte5ai/omadia](https://github.com/byte5ai/omadia).
+Die Tests bündeln `@omadia/channel-sdk` und `@omadia/plugin-api` aus `../middleware/packages/*/dist` (überschreibbar mit `OMADIA_CHANNEL_SDK_DIST` und `OMADIA_PLUGIN_API_DIST`). `@omadia/plugin-api` stellt der omadia-Host zur Laufzeit bereit (optionale Peer-Dep). Verlinke es aus einem lokalen omadia-Checkout zum Bauen. Aufbau siehe [byte5ai/omadia](https://github.com/byte5ai/omadia).
 
 ## Lizenz
 

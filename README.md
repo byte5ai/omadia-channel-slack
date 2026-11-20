@@ -39,6 +39,28 @@ A channel plugin (`kind: channel`). The omadia kernel activates it from `manifes
 2. Fill in the setup fields below. There is no API key for this plugin.
 3. Assign an LLM provider to the orchestrator first, so the chat agent has a model to run on.
 
+## Agents in Slack
+
+**Addressing.** This plugin runs **one Slack app per installation**: one bot token, one bot name and avatar. So the speaker is not shown through the platform, and several agents in the same Slack are reached with the native **`/agent`** command:
+
+- `/agent Mira` selects Mira for you in this conversation, `/agent` clears your selection, `/agents` lists the agents available to you here.
+- The plugin only forwards the text. The omadia kernel stores the selection per user and conversation, checks availability and answers with a short system notice that only you see (an ephemeral message).
+- Slack does not allow slash commands inside threads. Write `@YourBot /agent Mira` there, it is handled the same way.
+- Create the command in your Slack app (**Slash Commands**): `/agent`, Request URL `<public_base_url>/api/slack/commands` (Events API) or no URL (Socket Mode). See the setup guide.
+
+**Own identity per agent: not supported by this plugin.** Slack itself allows it: one Slack app per agent gives each its own name, avatar and `@mention`. `chat:write.customize` only changes name and avatar per message and is no addressable identity, so it is not used. A plugin installation holds exactly one token set (bot token, signing secret or app-level token), so per-agent apps would need one installation per app, and the kernel has no channel key for a Slack bot identity yet to bind such a bot to its agent. What it would cost you per agent: create and maintain a Slack app, its scopes, its request URL or app-level token, install it in the workspace and invite it to channels. Until then, use `/agent`.
+
+**How answers look.** Like a colleague's message: no status line, chip, footer, button or follow-up list.
+
+- One agent in a conversation: no name line. Several agents: a plain `Name:` line where the speaker would otherwise be unclear. The speaker history is kept in memory, so after a restart a conversation is recognised as a multi-agent one again from its second speaker on.
+- What a consulted colleague contributed appears as plain text (`Mira: ...`).
+- Messages from the system (for example "this agent is not available to you") are plain text of their own, never under an agent's name.
+- Choices become a numbered list in the text.
+- The AI disclosure line is part of the answer text and follows the operator's frequency setting.
+- There is **no receipt reaction** any more (the former eyes emoji) and no typing indicator: Slack offers none to a bot outside its AI-assistant surface. For long work the agent acknowledges once ("on it") after 8 seconds, then answers. A slash command that outlives its 30-minute `response_url` is answered as an ephemeral follow-up.
+
+**Groups.** The bot reads who is in a channel or group chat (`conversations.members`) and gives the kernel an honest roster (complete, partial or unknown). The kernel's audience check needs it: without the roster an agent does not answer in a group. Add the bot scopes `channels:read`, `groups:read`, `im:read` and `mpim:read`. A missing scope shows up as "roster unknown" in the log, not as a guess.
+
 ## Configuration
 
 | Field | Notes |
@@ -58,10 +80,10 @@ Use the Events API transport for production. Socket Mode works without a public 
 ```bash
 npm install
 npm run build   # tsc, emits dist/
-npm test        # validates manifest.yaml against core's invariants
+npm test        # node:test via esbuild; needs the built channel SDK of an omadia checkout
 ```
 
-`@omadia/plugin-api` is provided by the omadia host at runtime (optional peer dep). Link it from a local omadia checkout to build. See [byte5ai/omadia](https://github.com/byte5ai/omadia) for the layout.
+Tests bundle `@omadia/channel-sdk` and `@omadia/plugin-api` from `../middleware/packages/*/dist` (override with `OMADIA_CHANNEL_SDK_DIST` and `OMADIA_PLUGIN_API_DIST`). `@omadia/plugin-api` is provided by the omadia host at runtime (optional peer dep). Link it from a local omadia checkout to build. See [byte5ai/omadia](https://github.com/byte5ai/omadia) for the layout.
 
 ## License
 
