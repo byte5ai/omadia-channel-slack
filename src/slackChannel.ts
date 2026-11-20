@@ -54,12 +54,12 @@ export interface SlackChannelDeps {
 
 /**
  * The key under which the kernel knows this installation's Slack bot as the
- * identity that RECEIVES a message: `@<bot member id>`. Slack has no binding
+ * identity that RECEIVES a message: `slack-bot:<bot member id>` (S7). Slack has no binding
  * key per bot in the kernel contract yet; this is the key to bind (and to
  * declare as `asChannelKey`) once it has one.
  */
 export function slackBotChannelKey(botUserId: string): string {
-  return `@${botUserId}`;
+  return `slack-bot:${botUserId}`;
 }
 
 /** `response_url`s are minted by Slack on this domain; anything else is refused. */

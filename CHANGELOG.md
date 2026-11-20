@@ -29,8 +29,8 @@ omadia#2045 / #2086 / #2087 (S6 branch): do not publish before the kernel is liv
   `{ principal, locale }`. **Behaviour change:** a `reject` from the resolver
   is now answered with the kernel's `system` notice (or a short "no agent set
   up" text) and never by the default agent (INV-7, #1598).
-- **S1 resolver contract** (kernel `135a14dbe`, needs core `>=1.74.0`):
-  `compat.core` is `>=1.74.0 <2.0` (placeholder; the parent session sets the
+- **S1 resolver contract** (kernel `135a14dbe`, needs core `>=1.76.0`):
+  `compat.core` is `>=1.76.0 <2.0` (placeholder; the parent session sets the
   final range at landing). The resolver result is `bound | reject`, `chatAgent`
   always set (the old `fallback` decision is gone). On `reject` the text still
   reaches that ChatAgent (it carries out `/agent`, `/agents`) and only a
@@ -62,7 +62,7 @@ omadia#2045 / #2086 / #2087 (S6 branch): do not publish before the kernel is liv
   events through `core.emitConversationMessage` (feature-detected;
   `conversationDelivery` `none` skips). Conversation = channel id,
   `messageId` = `ts`, `replyToMessageId` = thread root of a thread reply,
-  `addressedToBot` on a mention, `receivedByChannelKey` = `@<bot member id>`
+  `addressedToBot` on a mention, `receivedByChannelKey` = `slack-bot:<bot member id>`
   (no binding key per bot in the contract yet). Not emitted for slash
   commands, disabled DMs, channels outside the allowlist. The conversation
   send provider returns the Slack `ts` as `messageId`.
