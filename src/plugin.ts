@@ -169,7 +169,9 @@ export async function activate(ctx: PluginContext, core: CoreApi): Promise<Chann
     core.registerConversationSendProvider?.(channelId, conversation);
     // Trigger and routine deliveries go out through the app the conversation
     // came through: an agent's own app, or the installation's.
-    routines?.publishProactiveSend(SLACK_CHANNEL_TYPE, createSlackProactiveSend((key) => fleet.sendFor(key)));
+    // Removed again on close, so nothing is delivered through a closed channel.
+    const dispose = routines?.publishProactiveSend(SLACK_CHANNEL_TYPE, createSlackProactiveSend((key) => fleet.sendFor(key)));
+    if (typeof dispose === 'function') disposers.push(dispose);
   };
 
   // Status admin UI. web-ui renders this as an iframe (manifest

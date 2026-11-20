@@ -29,6 +29,9 @@ plugin runs its own app only, as before.
   on an agent's own app, that app (`asChannelKey`); the proactive send posts
   through exactly that app (no name line on an agent's app, named like an
   answer on the installation's). An app that no longer runs here is an error.
+  These turns never become a person's Conductor reminder target
+  (`conductorBinding: false`), and the proactive send is removed when the
+  channel closes.
 - **`compat.core` `>=1.79.0 <2.0`** (placeholder): needs the kernel with agent
   channel identities (S7). The parent session sets the final range on release.
 

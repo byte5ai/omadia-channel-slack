@@ -63,7 +63,9 @@ export function createSlackRoutineTurn(
       ...(threadTs ? { threadTs } : {}),
       ...(key ? { asChannelKey: key } : {}),
     };
-    return routines.beginRoutineTurn({ userId, channel: SLACK_CHANNEL_TYPE, conversationRef });
+    // Triggers and routines only: a channel or an agent's app is not where the
+    // person's Conductor reminders go (`conductorBinding: false`).
+    return routines.beginRoutineTurn({ userId, channel: SLACK_CHANNEL_TYPE, conversationRef, conductorBinding: false });
   };
 }
 

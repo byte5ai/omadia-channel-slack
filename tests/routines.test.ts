@@ -36,9 +36,10 @@ test("a turn files its conversation, thread and, on an agent's own app, that app
     {
       userId: 'U1',
       channel: 'slack',
+      conductorBinding: false,
       conversationRef: { kind: 'channel', channelId: CHANNEL_ID, conversationId: 'C0AAAAAAA', conversationKey: 'slack:C0AAAAAAA', threadTs: '100.1', asChannelKey: MIRA_KEY },
     },
-    { userId: 'U1', channel: 'slack', conversationRef: { kind: 'channel', channelId: CHANNEL_ID, conversationId: 'D0AAAAAAA', conversationKey: 'slack:D0AAAAAAA' } },
+    { userId: 'U1', channel: 'slack', conductorBinding: false, conversationRef: { kind: 'channel', channelId: CHANNEL_ID, conversationId: 'D0AAAAAAA', conversationKey: 'slack:D0AAAAAAA' } },
   ]);
 });
 
