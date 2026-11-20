@@ -2,7 +2,7 @@ import { createHmac, timingSafeEqual } from 'node:crypto';
 
 import express, { type Request, type Response, type Router } from 'express';
 
-import type { SlackEnvelopeBody } from './inbound.js';
+import type { SlackEnvelopeBody, SlackSlashCommandPayload } from './inbound.js';
 import type { SlackChannel } from './slackChannel.js';
 import { errMessage } from './slackChannel.js';
 import type { LogSink } from './logger.js';
@@ -32,7 +32,9 @@ interface RawBodyRequest extends Request {
  * the one-time `url_verification` challenge, then ACKs every delivery within
  * Slack's 3-second budget and dispatches message/app_mention events
  * asynchronously into {@link SlackChannel.ingest} (orchestrator turns far exceed
- * 3s, so we never block the response on them).
+ * 3s, so we never block the response on them). Slash commands (`/agent`) arrive
+ * form-encoded on `<public_base_url>/api/slack/commands`, are verified with the
+ * same signature and go into {@link SlackChannel.ingestCommand}.
  */
 export function createEventsApiRouter(deps: EventsApiRouterDeps): Router {
   const router = express.Router();
@@ -46,6 +48,32 @@ export function createEventsApiRouter(deps: EventsApiRouterDeps): Router {
       },
     }),
   );
+
+  // Slash commands are form-encoded; same raw-byte capture for the HMAC.
+  router.use(
+    express.urlencoded({
+      extended: false,
+      limit: '100kb',
+      verify: (req, _res, buf) => {
+        (req as RawBodyRequest).rawBody = buf;
+      },
+    }),
+  );
+
+  router.post('/commands', (req: RawBodyRequest, res: Response) => {
+    const verdict = verifySignature(req, deps.signingSecret);
+    if (verdict !== 'ok') {
+      res.status(verdict === 'stale' ? 400 : 401).json({ ok: false, error: verdict });
+      return;
+    }
+    // Empty 200 within Slack's 3s budget (the user sees nothing); the answer
+    // follows ephemerally through the command's response_url.
+    res.status(200).end();
+    if (!deps.state.urlVerified) patchState(deps.state, { urlVerified: true });
+    void deps.channel.ingestCommand((req.body ?? {}) as SlackSlashCommandPayload).catch((err: unknown) => {
+      deps.log('error', 'Slack slash command ingest failed', { error: errMessage(err) });
+    });
+  });
 
   router.post('/events', (req: RawBodyRequest, res: Response) => {
     const verdict = verifySignature(req, deps.signingSecret);

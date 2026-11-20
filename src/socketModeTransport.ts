@@ -4,7 +4,7 @@ import { SocketModeClient } from '@slack/socket-mode';
 import { makeSlackLogger, type LogSink } from './logger.js';
 import type { SlackChannel } from './slackChannel.js';
 import { errMessage } from './slackChannel.js';
-import type { SlackEnvelopeBody } from './inbound.js';
+import type { SlackEnvelopeBody, SlackSlashCommandPayload } from './inbound.js';
 import { patchState, type ChannelState } from './state.js';
 
 export interface SocketModeTransportDeps {
@@ -19,7 +19,8 @@ export interface SocketModeTransportDeps {
  * endpoint required). Best for local dev and behind-firewall installs; Slack
  * recommends the Events API (webhook) for highest production reliability and
  * Marketplace distribution. A single generic `slack_event` listener ACKs every
- * envelope and funnels message/app_mention payloads into {@link SlackChannel.ingest}.
+ * envelope and funnels message/app_mention payloads into {@link SlackChannel.ingest}
+ * and `/agent` slash commands into {@link SlackChannel.ingestCommand}.
  */
 export class SocketModeTransport {
   private socket: SocketModeClient | undefined;
@@ -63,20 +64,16 @@ export class SocketModeTransport {
       });
 
       // Single generic listener: ACK every envelope (so Slack never retries),
-      // then dispatch only Events-API message/app_mention payloads.
+      // then dispatch Events-API message/app_mention payloads and slash commands.
       socket.on(
         'slack_event',
-        async (args: { ack: () => Promise<void>; body: SlackEnvelopeBody }) => {
+        async (args: { ack: () => Promise<void>; type?: string; body: unknown }) => {
           try {
             await args.ack();
           } catch {
             /* ack failure is non-fatal — Slack retries, channel dedup guards it */
           }
-          const body = args.body;
-          if (!body || body.type !== 'events_api' || !body.event) return;
-          const event = body.event;
-          if (event.type !== 'message' && event.type !== 'app_mention') return;
-          await this.deps.channel.ingest(event, body.team_id);
+          await routeSocketEnvelope(this.deps.channel, args.type, args.body);
         },
       );
 
@@ -110,4 +107,27 @@ export class SocketModeTransport {
     }
     this.socket = undefined;
   }
+}
+
+/**
+ * Dispatch one acknowledged Socket Mode envelope. The envelope `type` tells
+ * the kinds apart (`events_api`, `slash_commands`); the payload of an
+ * `events_api` envelope is an Events API callback (`type: 'event_callback'`),
+ * so the kind is NOT read from the payload.
+ */
+export async function routeSocketEnvelope(
+  channel: SlackChannel,
+  envelopeType: string | undefined,
+  body: unknown,
+): Promise<void> {
+  if (!body || typeof body !== 'object') return;
+  if (envelopeType === 'slash_commands') {
+    await channel.ingestCommand(body as SlackSlashCommandPayload);
+    return;
+  }
+  if (envelopeType !== 'events_api') return;
+  const payload = body as SlackEnvelopeBody;
+  const event = payload.event;
+  if (!event || (event.type !== 'message' && event.type !== 'app_mention')) return;
+  await channel.ingest(event, payload.team_id);
 }

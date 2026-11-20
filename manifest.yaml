@@ -21,7 +21,7 @@ identity:
   kind: "channel"
   domain: "slack"
   name: "Slack"
-  version: "0.2.3"                         # === package.json "version"
+  version: "0.3.0"                         # === package.json "version"
   description: "Slack-Channel via Events API (Webhook, prod-empfohlen) oder Socket Mode (Fallback ohne Public-Host). Routet Slack-DMs und @Mentions in den Omadia-Orchestrator."
   authors:
     - name: "byte5 GmbH"
@@ -34,7 +34,7 @@ identity:
     - "communication"
 
 compat:
-  core: ">=1.0 <2.0"
+  core: ">=1.75.0 <2.0"                    # placeholder: S6 lands with plugin-api 1.75.0; the parent session confirms the number before publish
   node: ">=20"
 
 depends_on: []
@@ -72,9 +72,12 @@ setup:
 
       ### 2. Set bot scopes
       Left sidebar → **OAuth & Permissions** → **Scopes** → **Bot Token Scopes** → add these:
-      `app_mentions:read`, `chat:write`, `reactions:write`, `im:history`,
-      `channels:history`, `groups:history`, `mpim:history`, `users:read`
-      (optional: `users:read.email`, so the Conductor people picker can show and match e-mail addresses).
+      `app_mentions:read`, `chat:write`, `im:history`,
+      `channels:history`, `groups:history`, `mpim:history`, `users:read`,
+      `channels:read`, `groups:read`, `im:read`, `mpim:read`
+      (the four `*:read` scopes let the bot read who is in a conversation: in
+      channels and group chats agents answer only when the member list is known;
+      optional: `users:read.email`, so the Conductor people picker can show and match e-mail addresses).
 
       ### 3. Install & get the bot token
       1. At the top, click **Install to Workspace** → **Allow**.
@@ -97,9 +100,21 @@ setup:
       3. Left sidebar → **Socket Mode** → **Enable**.
       4. **Event Subscriptions** → subscribe to the same bot events as above (no Request URL needed).
 
-      ### 5. Invite the bot to channels
+      ### 5. Add the `/agent` command
+      Left sidebar → **Slash Commands** → **Create New Command**:
+      command `/agent`, short description *Choose which agent you talk to*, usage hint `[agent name]`.
+      Events API mode: Request URL `<your-base-url>/api/slack/commands`. Socket Mode: no URL needed.
+      Optionally add `/agents` the same way (lists the agents available to you).
+      Slack does not allow slash commands inside threads: there, write `@YourBot /agent Mira`.
+      The command only forwards its text; the omadia kernel carries it out and answers you privately.
+
+      ### 6. Invite the bot to channels
       Run `/invite @YourBot` in each channel you want. DMs work without an
       invite (if *Allow direct messages* is on).
+
+      ### One identity per installation
+      This plugin runs one Slack app (one bot name and avatar). Several agents in the
+      same Slack are reached through `/agent`; see the README for per-agent apps.
     de: |
       ## Slack-App anlegen
 
@@ -112,9 +127,12 @@ setup:
 
       ### 2. Bot-Scopes setzen
       Linke Leiste → **OAuth & Permissions** → **Scopes** → **Bot Token Scopes** → diese hinzufügen:
-      `app_mentions:read`, `chat:write`, `reactions:write`, `im:history`,
-      `channels:history`, `groups:history`, `mpim:history`, `users:read`
-      (optional: `users:read.email`, so the Conductor people picker can show and match e-mail addresses).
+      `app_mentions:read`, `chat:write`, `im:history`,
+      `channels:history`, `groups:history`, `mpim:history`, `users:read`,
+      `channels:read`, `groups:read`, `im:read`, `mpim:read`
+      (die vier `*:read`-Scopes lassen den Bot lesen, wer in einer Unterhaltung ist: in
+      Channels und Gruppenchats antworten Agenten nur, wenn die Mitgliederliste bekannt ist;
+      optional: `users:read.email`, damit die Personensuche der Conductor-Schritte E-Mail-Adressen zeigt und abgleicht).
 
       ### 3. Installieren & Bot-Token holen
       1. Oben auf **Install to Workspace** → **Allow**.
@@ -137,14 +155,26 @@ setup:
       3. Linke Leiste → **Socket Mode** → **Enable**.
       4. **Event Subscriptions** → dieselben Bot-Events wie oben abonnieren (keine Request URL nötig).
 
-      ### 5. Bot in Channels einladen
+      ### 5. Den Befehl `/agent` anlegen
+      Linke Leiste → **Slash Commands** → **Create New Command**:
+      Befehl `/agent`, Kurzbeschreibung *Agent wählen, mit dem du sprichst*, Usage Hint `[Agentenname]`.
+      Events-API-Modus: Request URL `<deine-base-url>/api/slack/commands`. Socket Mode: keine URL nötig.
+      Optional `/agents` genauso anlegen (listet die Agenten, die dir zur Verfügung stehen).
+      Slack erlaubt keine Slash-Commands in Threads: dort `@DeinBot /agent Mira` schreiben.
+      Der Befehl leitet nur seinen Text weiter; der omadia-Kernel führt ihn aus und antwortet dir privat.
+
+      ### 6. Bot in Channels einladen
       In jedem gewünschten Channel `/invite @DeinBot` ausführen. DMs funktionieren
       ohne Einladung (falls *Direktnachrichten zulassen* aktiv).
+
+      ### Eine Identität pro Installation
+      Dieses Plugin betreibt eine Slack-App (ein Bot-Name, ein Avatar). Mehrere Agenten im
+      selben Slack erreichst du über `/agent`; Apps pro Agent siehe README.
   fields:
     - key: "bot_token"
       type: "secret"
       label: "Bot User OAuth Token (xoxb-…)"
-      help: "OAuth & Permissions → Bot User OAuth Token. Benötigte Bot-Scopes: app_mentions:read, chat:write, reactions:write, im:history, channels:history, groups:history, mpim:history, users:read (optional users:read.email für die Personensuche)."
+      help: "OAuth & Permissions → Bot User OAuth Token. Benötigte Bot-Scopes: app_mentions:read, chat:write, im:history, channels:history, groups:history, mpim:history, users:read, channels:read, groups:read, im:read, mpim:read (optional users:read.email für die Personensuche). Die *:read-Scopes liefern die Mitgliederliste; ohne sie antwortet der Bot in Gruppen nicht."
       required: true
 
     - key: "public_base_url"
@@ -251,6 +281,8 @@ channel:
     kind: "webhook"
     routes:
       - path: "/api/slack/events"
+        method: "POST"
+      - path: "/api/slack/commands"          # the /agent slash command (Events API mode)
         method: "POST"
     verify_signature: true
   capabilities:

@@ -1,6 +1,6 @@
 {
   "name": "@omadia/channel-slack",
-  "version": "0.2.3",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
   "main": "dist/plugin.js",
@@ -13,8 +13,9 @@
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
+    "test": "node scripts/test.mjs",
     "build": "node scripts/build-zip.mjs",
-    "clean": "rm -rf dist out"
+    "clean": "rm -rf dist out .test-build"
   },
   "dependencies": {
     "@slack/logger": "^4.0.0",
