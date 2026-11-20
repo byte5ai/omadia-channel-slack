@@ -14,6 +14,7 @@ import { createEventsApiRouter } from './eventsApiTransport.js';
 import { SlackOutbox } from './outbox.js';
 import { SlackChannel } from './slackChannel.js';
 import { createSlackPeopleDirectoryProvider } from './slackPeopleDirectory.js';
+import { createSlackRosterProvider } from './slackRoster.js';
 import { SocketModeTransport } from './socketModeTransport.js';
 import { createChannelState, patchState } from './state.js';
 import { handleSlackTurn, type TurnDeps } from './turn.js';
@@ -96,6 +97,16 @@ export async function activate(ctx: PluginContext, core: CoreApi): Promise<Chann
     );
   };
 
+  // Conversation roster (members of a channel / group DM). The kernel's audience
+  // floor reads it before an agent answers in a group; without it a group gets
+  // no answer. Feature-detected like the people directory, same ordering rule.
+  const registerRoster = (): void => {
+    core.registerRosterProvider?.(
+      channelId,
+      createSlackRosterProvider({ channel, log: (m) => core.log('warn', m) }),
+    );
+  };
+
   // Status admin UI. web-ui renders this as an iframe (manifest
   // `admin_ui_path`); the UI fetches its JSON API with RELATIVE paths so it
   // resolves through the `/bot-api` rewrite.
@@ -151,6 +162,7 @@ export async function activate(ctx: PluginContext, core: CoreApi): Promise<Chann
     );
 
     registerPeopleDirectory();
+    registerRoster();
     return { async close() { for (const d of disposers.reverse()) d(); } };
   }
 
@@ -175,6 +187,7 @@ export async function activate(ctx: PluginContext, core: CoreApi): Promise<Chann
   });
 
   registerPeopleDirectory();
+  registerRoster();
   return { async close() { for (const d of disposers.reverse()) d(); } };
 }
 
