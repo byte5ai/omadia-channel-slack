@@ -41,6 +41,23 @@ omadia#2045 / #2086 / #2087 (S6 branch): do not publish before the kernel is liv
   (`ChannelResolveResult.speaker`), no longer as `system`; without a speaker
   it is skipped, and an answer without a speaker is withheld and replaced by a
   `system` notice (fail-closed).
+- **No singleton fallback**: the turn path uses the SDK's `resolveChannelRoute`
+  and always the `chatAgent` of its result (also on `reject`). A throwing
+  resolver is an error of the turn (system notice), no longer a reason to ask
+  `chatAgent@1`, which since S1 only serves a host without a resolver.
+- **Selection key**: the agent selection lives at the narrowest conversation
+  key, the Slack channel, never the workspace. A binding on the workspace key
+  still answers ordinary turns; `/agent` goes to the ChatAgent of the channel
+  key (the SDK's `parseAgentCommand` only chooses the target, the text is
+  untouched).
+- **Sender profile** (`users.info`, cached, 1.5 s timeout, never blocks a
+  turn): the e-mail makes the principal `user:<e-mail>` (bot scope
+  `users:read.email`, optional), the language (`de` / `en`) goes to the
+  resolver as `locale` and to the pace acknowledgement.
+- **People directory** builds `principalRef` with `channelUserPrincipal`
+  (`slack-user:<id>` or the e-mail, was the bare member id), the form of the
+  turn principal. **Kernel follow-up:** `bindingKeyForTurn` still keys a Slack
+  binding by the bare member id.
 - **Send providers**: `TargetedSendProvider` (DM by member id,
   `user:slack-user:<id>` or e-mail via `users.lookupByEmail`, scope
   `users:read.email`) and `ConversationSendProvider`, registered when the
