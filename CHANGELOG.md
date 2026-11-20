@@ -1,5 +1,29 @@
 # Changelog
 
+## Unreleased
+
+An agent's own Slack app (byte5ai/omadia#2042, spec §5.3, §8 item 20). Needs
+a kernel with `registerAgentIdentityProvider` (S7); on an older kernel the
+plugin runs its own app only, as before.
+
+- **One app per agent** next to the installation's own app: the plugin
+  registers an `AgentIdentityProvider` (fields: bot token, plus the signing
+  secret for the Events API or an app-level token for Socket Mode, matching
+  the channel's transport). The bot token is checked with `auth.test`, the
+  credentials are stored in the plugin vault as `agent_app_<member id>`, and
+  the app starts (Events API at `/api/slack/agent-bots/<member id>/events`
+  with its own signing secret, or its own Socket Mode connection). Boot
+  restarts every stored app; removal stops it and deletes the credentials.
+  New permission `secrets.runtime_write`.
+- **Bot key `slack-bot:<member id>` is lowercase** (routing keys are compared
+  lowercase).
+- **An agent app resolves on its own key** and answers only when the kernel
+  reports the key as that agent's identity (`exclusive`); otherwise a system
+  notice, never another agent. No name line.
+- **Sends and rosters per app**: the providers declare `asChannelKey` and post
+  through exactly the app named (unknown key: unreachable); `presentIn` tells
+  the kernel which agent apps are members of a conversation.
+
 ## 0.3.0
 
 Agents as colleagues in Slack (omadia#2042, issue #5). Needs kernel

@@ -53,13 +53,14 @@ export interface SlackChannelDeps {
 }
 
 /**
- * The key under which the kernel knows this installation's Slack bot as the
- * identity that RECEIVES a message: `slack-bot:<bot member id>` (S7). Slack has no binding
- * key per bot in the kernel contract yet; this is the key to bind (and to
- * declare as `asChannelKey`) once it has one.
+ * The key under which the kernel knows a Slack bot: `slack-bot:<bot member
+ * id>`, lowercase like every routing key (spec 2042 §5.3). The same string for
+ * the installation's own app and for an agent's own app: routing resolves an
+ * agent app on it (exclusive), `asChannelKey` names it on sends, and message
+ * events are received under it.
  */
 export function slackBotChannelKey(botUserId: string): string {
-  return `slack-bot:${botUserId}`;
+  return `slack-bot:${botUserId.toLowerCase()}`;
 }
 
 /** `response_url`s are minted by Slack on this domain; anything else is refused. */
@@ -492,6 +493,21 @@ export class SlackChannel implements SlackSink {
   /** The bot's own member id, once `init()` has run (empty before). */
   get selfUserId(): string {
     return this.botUserId;
+  }
+
+  /** The bot's routing key `slack-bot:<member id>`, once `init()` has run. */
+  channelKey(): string | undefined {
+    return this.botUserId ? slackBotChannelKey(this.botUserId) : undefined;
+  }
+
+  /** Is this bot a member of the conversation? For "who can be heard here". */
+  async isMemberOf(conversationId: string): Promise<boolean> {
+    try {
+      const info = await this.web.conversations.info({ channel: conversationId });
+      return info.channel?.is_member === true || info.channel?.is_im === true;
+    } catch {
+      return false;
+    }
   }
 
   private trimHandledKeys(): void {

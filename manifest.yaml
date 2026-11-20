@@ -112,9 +112,11 @@ setup:
       Run `/invite @YourBot` in each channel you want. DMs work without an
       invite (if *Allow direct messages* is on).
 
-      ### One identity per installation
-      This plugin runs one Slack app (one bot name and avatar). Several agents in the
-      same Slack are reached through `/agent`; see the README for per-agent apps.
+      ### Own app per agent
+      The app in this setup is shared: agents are reached through it with `/agent`.
+      An agent can also have a Slack app of its own (own name, avatar and @mention):
+      create it from the same app manifest, then enter its credentials on the
+      agent's page in omadia (Channels → Own bots). See the README.
     de: |
       ## Slack-App anlegen
 
@@ -167,9 +169,11 @@ setup:
       In jedem gewünschten Channel `/invite @DeinBot` ausführen. DMs funktionieren
       ohne Einladung (falls *Direktnachrichten zulassen* aktiv).
 
-      ### Eine Identität pro Installation
-      Dieses Plugin betreibt eine Slack-App (ein Bot-Name, ein Avatar). Mehrere Agenten im
-      selben Slack erreichst du über `/agent`; Apps pro Agent siehe README.
+      ### Eigene App pro Agent
+      Die App in diesem Setup ist gemeinsam: Agenten erreichst du darüber mit `/agent`.
+      Ein Agent kann auch eine eigene Slack-App haben (eigener Name, Avatar und
+      @Erwähnung): lege sie aus demselben App-Manifest an und trage ihre Zugangsdaten
+      auf der Agent-Seite in omadia ein (Kanäle → Eigene Bots). Siehe README.
   fields:
     - key: "bot_token"
       type: "secret"
@@ -229,6 +233,10 @@ setup:
 # descriptive, not enforced for this plugin.
 # ---------------------------------------------------------------------------
 permissions:
+  # Spec 2042 §5.3 — agents' own apps: their credentials are stored per app in
+  # this plugin's vault (`agent_app_<member id>`). Gates ctx.secrets.set/delete.
+  secrets:
+    runtime_write: true
   memory:
     reads: []
     writes: []

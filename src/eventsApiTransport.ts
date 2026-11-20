@@ -37,6 +37,23 @@ interface RawBodyRequest extends Request {
  * same signature and go into {@link SlackChannel.ingestCommand}.
  */
 export function createEventsApiRouter(deps: EventsApiRouterDeps): Router {
+  return eventsRouter('', () => deps);
+}
+
+/**
+ * Spec 2042 §5.3 — the Events API endpoints of agents' own Slack apps, one
+ * router for all: `POST /<botUserId>/events` and `/<botUserId>/commands`
+ * (mounted at `<prefix>/agent-bots`), each verified with that app's OWN
+ * signing secret. An app that is not running answers 404.
+ */
+export function createAgentBotsEventsRouter(lookup: (botUserId: string) => EventsApiRouterDeps | undefined): Router {
+  return eventsRouter('/:botUserId', (req) => {
+    const raw = req.params['botUserId'];
+    return typeof raw === 'string' && /^[a-z0-9]{6,30}$/.test(raw) ? lookup(raw) : undefined;
+  });
+}
+
+function eventsRouter(prefix: string, resolve: (req: Request) => EventsApiRouterDeps | undefined): Router {
   const router = express.Router();
 
   // Capture the raw bytes for signature verification while still parsing JSON.
@@ -60,7 +77,12 @@ export function createEventsApiRouter(deps: EventsApiRouterDeps): Router {
     }),
   );
 
-  router.post('/commands', (req: RawBodyRequest, res: Response) => {
+  router.post(`${prefix}/commands`, (req: RawBodyRequest, res: Response) => {
+    const deps = resolve(req);
+    if (!deps) {
+      res.status(404).json({ ok: false, error: 'unknown_app' });
+      return;
+    }
     const verdict = verifySignature(req, deps.signingSecret);
     if (verdict !== 'ok') {
       res.status(verdict === 'stale' ? 400 : 401).json({ ok: false, error: verdict });
@@ -75,7 +97,12 @@ export function createEventsApiRouter(deps: EventsApiRouterDeps): Router {
     });
   });
 
-  router.post('/events', (req: RawBodyRequest, res: Response) => {
+  router.post(`${prefix}/events`, (req: RawBodyRequest, res: Response) => {
+    const deps = resolve(req);
+    if (!deps) {
+      res.status(404).json({ ok: false, error: 'unknown_app' });
+      return;
+    }
     const verdict = verifySignature(req, deps.signingSecret);
     if (verdict !== 'ok') {
       // 400 for stale/malformed (no retry value), 401 for a bad signature.

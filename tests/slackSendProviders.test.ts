@@ -25,16 +25,20 @@ const BALLOT: QuestionCard = {
   ],
 } as unknown as QuestionCard;
 
+const OWN_KEY = 'slack-bot:ubot';
+
 function setup(users: { userIdByEmail(email: string): Promise<string | undefined> } = { userIdByEmail: async () => undefined }) {
   const sink = new RecordingSink();
   const outbox = new SlackOutbox(sink);
-  const providers = createSlackSendProviders({ outbox, users });
+  // One app: no key and its own key name it, nothing else does.
+  const bot = { outbox, users };
+  const providers = createSlackSendProviders((key) => (key === undefined || key === OWN_KEY ? bot : undefined));
   return { sink, providers };
 }
 
-test('the providers declare mentions only: no own identity, no poll, no card', () => {
+test('the providers declare mentions and the named identity: no poll, no card', () => {
   const { providers } = setup();
-  assert.deepEqual(providers.targeted.supports, { mentions: true });
+  assert.deepEqual(providers.targeted.supports, { mentions: true, asChannelKey: true });
   assert.equal(providers.conversation.supports, SLACK_SEND_CAPABILITIES);
   assert.equal(providers.targeted.channelType, 'slack');
   assert.equal(providers.conversation.channelType, 'slack');
@@ -67,7 +71,10 @@ test('attachments ride along as plain links', async () => {
   assert.equal(sink.calls[0]?.text, 'Bericht\n\n<https://example.com/r.pdf|Report>');
 });
 
-test('a send that asks for an agent identity is refused, never posted under the one bot', async () => {
+test('a send as its own key goes out; one for an app that does not run here is refused, never posted under another', async () => {
+  const own = setup();
+  const delivered = await own.providers.conversation.sendToConversation('C9', { text: 'x' }, { asChannelKey: 'SLACK-BOT:UBOT' });
+  assert.equal(delivered.outcome, 'delivered');
   const { sink, providers } = setup();
   const conv = await providers.conversation.sendToConversation('C9', { text: 'x' }, { asChannelKey: 'slack:T1:B1' });
   const dm = await providers.targeted.sendToUser({ principalId: 'user:slack-user:u1' }, { text: 'x' }, { asChannelKey: 'slack:T1:B1' });
@@ -122,7 +129,8 @@ test('a Slack API failure while posting is returned as unreachable', async () =>
     replyToCommand: async () => undefined,
     sendEphemeral: async () => undefined,
   };
-  const providers = createSlackSendProviders({ outbox: new SlackOutbox(failing), users: { userIdByEmail: async () => undefined } });
+  const bot = { outbox: new SlackOutbox(failing), users: { userIdByEmail: async () => undefined } };
+  const providers = createSlackSendProviders(() => bot);
   const out = await providers.conversation.sendToConversation('C9', { text: 'x' });
   assert.equal(out.outcome === 'unreachable' && out.code, 'not_permitted');
 });

@@ -154,7 +154,7 @@ test('a thread reply is emitted as a created message with replyToMessageId, keye
       channelType: 'slack',
       conversationId: 'C1',
       conversationType: 'group',
-      receivedByChannelKey: 'slack-bot:UBOT',
+      receivedByChannelKey: 'slack-bot:ubot',
       messageId: '200.2',
       revision: 0,
       kind: 'created',
@@ -204,7 +204,7 @@ test('nothing is emitted when the kernel hands the bot nothing of the conversati
   const { channel, events } = emitting({}, (conversation, key) => (asked.push(`${conversation}/${key}`), 'none'));
   await channel.ingest({ type: 'message', channel: 'C1', user: 'U1', text: 'x', ts: '1.1', channel_type: 'channel' }, 'T1');
   assert.deepEqual(events, []);
-  assert.deepEqual(asked, ['C1/slack-bot:UBOT']);
+  assert.deepEqual(asked, ['C1/slack-bot:ubot']);
 });
 
 test('slash commands, disabled DMs and non-allowlisted channels are not emitted', async () => {
