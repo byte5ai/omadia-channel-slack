@@ -250,6 +250,21 @@ export class SlackChannel implements SlackSink {
     return this.usersCache;
   }
 
+  /**
+   * Member id for an e-mail address (`users.lookupByEmail`; bot scope
+   * `users:read.email`). `undefined` when nobody in the workspace has it;
+   * throws the Web API error (with `data.error`) for anything else.
+   */
+  async userIdByEmail(email: string): Promise<string | undefined> {
+    try {
+      const res = await this.web.users.lookupByEmail({ email });
+      return res.user?.id;
+    } catch (err) {
+      if ((err as { data?: { error?: unknown } }).data?.error === 'users_not_found') return undefined;
+      throw err;
+    }
+  }
+
   async sendText(channel: string, text: string, threadTs?: string): Promise<void> {
     await this.web.chat.postMessage({
       channel,
