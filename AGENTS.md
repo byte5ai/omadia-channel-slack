@@ -10,4 +10,4 @@ Notes for coding agents working in this repository.
 
 ## Decisions
 
-- **Reactions (spec 2043 §5.14, omadia #2061).** The kernel's `ConversationReaction` `acknowledge` is Slack's `+1` (thumbs-up), set with [`reactions.add`](https://docs.slack.dev/reference/methods/reactions.add) (`channel` = the conversation id, `timestamp` = the message `ts`, both as the inbound `created` event reported them; bot scope `reactions:write`, optional). `already_reacted` is success. The only reaction this plugin sets is the one the kernel asks for: there is no receipt reaction on inbound messages.
+- **Reactions (spec 2043 §5.14, omadia #2061; kernel ADR 0027, byte5ai/omadia#2151: channel-sdk 0.3.9, plugin-api 1.82.0).** The kernel's `ConversationReaction` `acknowledge` is Slack's `+1` (thumbs-up), set with [`reactions.add`](https://docs.slack.dev/reference/methods/reactions.add) (`channel` = the conversation id, `timestamp` = the message `ts`, both as the inbound `created` event reported them; bot scope `reactions:write`, optional). `already_reacted` is success. The only reaction this plugin sets is the one the kernel asks for: there is no receipt reaction on inbound messages.

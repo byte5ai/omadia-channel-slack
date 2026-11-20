@@ -3,8 +3,8 @@
 ## Unreleased
 
 Bot reactions (spec 2043 §5.14, byte5ai/omadia#2061). Needs a kernel with
-`ConversationSendProvider.react` (channel-sdk 0.3.9, plugin-api 1.81.0); an
-older kernel never calls it.
+`ConversationSendProvider.react` (channel-sdk 0.3.9, plugin-api 1.82.0;
+ADR 0027, byte5ai/omadia#2151); an older kernel never calls it.
 
 - **The conversation provider reacts**: it declares `supports.reactions` and
   implements `react`, which sets a thumbs-up (`+1`) through `reactions.add`
