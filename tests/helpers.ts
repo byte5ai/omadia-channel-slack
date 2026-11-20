@@ -23,8 +23,9 @@ export interface SinkCall {
 /** A sink that records everything the plugin would send to Slack. */
 export class RecordingSink implements SlackSink {
   readonly calls: SinkCall[] = [];
-  async sendText(channel: string, text: string, threadTs?: string): Promise<void> {
+  async sendText(channel: string, text: string, threadTs?: string): Promise<string | undefined> {
     this.calls.push({ kind: 'post', target: channel, text, ...(threadTs ? { threadTs } : {}) });
+    return `${String(this.calls.length)}.000100`;
   }
   async replyToCommand(responseUrl: string, text: string): Promise<void> {
     this.calls.push({ kind: 'command', target: responseUrl, text });

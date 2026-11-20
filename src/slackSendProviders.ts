@@ -119,11 +119,12 @@ export function createSlackSendProviders(opts: {
     const text = proactiveText(message);
     if (text.trim().length === 0) return unreachable('channel_error', 'nothing to send');
     try {
-      await opts.outbox.deliver(
+      const { messageId } = await opts.outbox.deliverMessage(
         { text, speaker: SYSTEM_SPEAKER },
         { conversationId, conversationKey: `${SLACK_CHANNEL_TYPE}:${conversationId}` },
       );
-      return { outcome: 'delivered' };
+      // The Slack `ts`: what a typed reply to this message points at (the kernel's open question).
+      return { outcome: 'delivered', ...(messageId ? { messageId } : {}) };
     } catch (err) {
       return failure(err);
     }

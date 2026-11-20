@@ -58,6 +58,14 @@ omadia#2045 / #2086 / #2087 (S6 branch): do not publish before the kernel is liv
   (`slack-user:<id>` or the e-mail, was the bare member id), the form of the
   turn principal. **Kernel follow-up:** `bindingKeyForTurn` still keys a Slack
   binding by the bare member id.
+- **Typed answers to polls and cards** (kernel c510bf5c4): `created` message
+  events through `core.emitConversationMessage` (feature-detected;
+  `conversationDelivery` `none` skips). Conversation = channel id,
+  `messageId` = `ts`, `replyToMessageId` = thread root of a thread reply,
+  `addressedToBot` on a mention, `receivedByChannelKey` = `@<bot member id>`
+  (no binding key per bot in the contract yet). Not emitted for slash
+  commands, disabled DMs, channels outside the allowlist. The conversation
+  send provider returns the Slack `ts` as `messageId`.
 - **Send providers**: `TargetedSendProvider` (DM by member id,
   `user:slack-user:<id>` or e-mail via `users.lookupByEmail`, scope
   `users:read.email`) and `ConversationSendProvider`, registered when the

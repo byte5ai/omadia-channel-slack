@@ -43,7 +43,7 @@ test('the providers declare mentions only: no own identity, no poll, no card', (
 test('a conversation post goes into the channel as plain system text through the outbox', async () => {
   const { sink, providers } = setup();
   const out = await providers.conversation.sendToConversation('C9', { text: 'Erinnerung: Review heute.' });
-  assert.deepEqual(out, { outcome: 'delivered' });
+  assert.deepEqual(out, { outcome: 'delivered', messageId: '1.000100' }, 'the Slack ts, what a reply points at');
   assert.deepEqual(sink.calls, [{ kind: 'post', target: 'C9', text: 'Erinnerung: Review heute.' }]);
 });
 

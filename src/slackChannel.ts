@@ -2,7 +2,7 @@ import { LogLevel } from '@slack/logger';
 import { WebClient } from '@slack/web-api';
 import type { SlackDirectoryUser } from './slackPeopleDirectory.js';
 
-import type { IncomingTurn } from '@omadia/channel-sdk';
+import type { ConversationMessageEvent, IncomingTurn } from '@omadia/channel-sdk';
 
 import {
   buildIncomingTurn,
@@ -35,6 +35,24 @@ export interface SlackChannelDeps {
   state: ChannelState;
   policy: AccessPolicy;
   onMessage: (turn: IncomingTurn) => Promise<void>;
+  /**
+   * Tells the kernel about an inbound message (`core.emitConversationMessage`,
+   * feature-detected: absent on an older kernel, then nothing is emitted). The
+   * kernel stores it only for a subscribed conversation and drops it otherwise.
+   */
+  emitMessage?: (event: ConversationMessageEvent) => void;
+  /** `core.conversationDelivery`: what the bot identity is handed of a conversation. Absent: emit. */
+  deliveryOf?: (conversationId: string, channelKey: string) => 'all' | 'addressed' | 'none';
+}
+
+/**
+ * The key under which the kernel knows this installation's Slack bot as the
+ * identity that RECEIVES a message: `@<bot member id>`. Slack has no binding
+ * key per bot in the kernel contract yet; this is the key to bind (and to
+ * declare as `asChannelKey`) once it has one.
+ */
+export function slackBotChannelKey(botUserId: string): string {
+  return `@${botUserId}`;
 }
 
 /** `response_url`s are minted by Slack on this domain; anything else is refused. */
@@ -155,6 +173,13 @@ export class SlackChannel implements SlackSink {
       const channelType = event.channel_type ?? 'channel';
       const isDm = channelType === 'im';
 
+      // The kernel's message record sees every human message of a conversation
+      // it moderates, also one that does not mention the bot (a typed answer to
+      // a poll). It is no turn: the mention gate below still decides on that.
+      if (!source.command && !(isDm && !this.deps.policy.allowDms) && this.isAllowlisted(event)) {
+        await this.emitCreated(event, teamId);
+      }
+
       // Access policy. An explicit @mention (or slash command) always passes
       // the channel policy (the user asked for the bot by name); plain
       // messages are gated by DM / channel policy. Direct messages can be
@@ -171,17 +196,12 @@ export class SlackChannel implements SlackSink {
       }
 
       // Allowlist by channel id and/or user id.
-      if (this.deps.policy.allowlist.size > 0) {
-        const allowed =
-          this.deps.policy.allowlist.has(event.channel) ||
-          (event.user !== undefined && this.deps.policy.allowlist.has(event.user));
-        if (!allowed) {
-          this.deps.log('info', 'Slack message dropped (not allowlisted)', {
-            channel: event.channel,
-            user: event.user,
-          });
-          return;
-        }
+      if (!this.isAllowlisted(event)) {
+        this.deps.log('info', 'Slack message dropped (not allowlisted)', {
+          channel: event.channel,
+          user: event.user,
+        });
+        return;
       }
 
       let text = extractText(event);
@@ -239,6 +259,56 @@ export class SlackChannel implements SlackSink {
   private rememberProfile(userId: string, profile: SlackSenderProfile, ttlMs: number): void {
     if (this.profiles.size >= PROFILE_CACHE_MAX) this.profiles.clear();
     this.profiles.set(userId, { profile, expiresAt: Date.now() + ttlMs });
+  }
+
+  private isAllowlisted(event: SlackMessageEvent): boolean {
+    const { allowlist } = this.deps.policy;
+    return (
+      allowlist.size === 0 ||
+      allowlist.has(event.channel) ||
+      (event.user !== undefined && allowlist.has(event.user))
+    );
+  }
+
+  /**
+   * Emit a `created` conversation message (#2043, #2086): the conversation is
+   * the Slack channel id, `messageId` the `ts`, a thread reply carries the
+   * thread root as `replyToMessageId`, a mention of the bot sets
+   * `addressedToBot`. Needs `emitMessage` and the bot's own id (after `init`);
+   * skipped when the kernel says the bot is handed nothing of this conversation.
+   * Never fails the turn.
+   */
+  private async emitCreated(event: SlackMessageEvent, teamId: string | undefined): Promise<void> {
+    const { emitMessage, deliveryOf } = this.deps;
+    if (!emitMessage || !this.botUserId || !event.user) return;
+    const receivedByChannelKey = slackBotChannelKey(this.botUserId);
+    if (deliveryOf?.(event.channel, receivedByChannelKey) === 'none') return;
+    try {
+      const raw = extractText(event);
+      const text = raw ? stripMention(raw, this.botUserId) : undefined;
+      const isDm = (event.channel_type ?? 'channel') === 'im';
+      const profile = deliveryOf ? await this.senderProfile(event.user) : {};
+      const mentionsBot = event.type === 'app_mention' || (raw?.includes(`<@${this.botUserId}`) ?? false);
+      const occurredAt = new Date(Number.parseFloat(event.ts) * 1000);
+      emitMessage({
+        channelId: this.deps.channelId,
+        channelType: 'slack',
+        conversationId: event.channel,
+        conversationType: isDm ? 'direct' : 'group',
+        receivedByChannelKey,
+        messageId: event.ts,
+        revision: 0,
+        kind: 'created',
+        author: { kind: 'slack-user', id: event.user, ...(profile.email ? { email: profile.email } : {}) },
+        ...(teamId ? { tenantId: teamId } : {}),
+        ...(text ? { text } : {}),
+        ...(event.thread_ts && event.thread_ts !== event.ts ? { replyToMessageId: event.thread_ts } : {}),
+        ...(mentionsBot ? { addressedToBot: true } : {}),
+        occurredAt: Number.isFinite(occurredAt.getTime()) ? occurredAt.toISOString() : new Date().toISOString(),
+      });
+    } catch (err) {
+      this.deps.log('warn', 'Slack message event not emitted', { error: errMessage(err) });
+    }
   }
 
   /** Post a message. `threadTs` threads the reply (channel messages); omit for
@@ -307,13 +377,14 @@ export class SlackChannel implements SlackSink {
     }
   }
 
-  async sendText(channel: string, text: string, threadTs?: string): Promise<void> {
-    await this.web.chat.postMessage({
+  async sendText(channel: string, text: string, threadTs?: string): Promise<string | undefined> {
+    const res = await this.web.chat.postMessage({
       channel,
       text,
       mrkdwn: true,
       ...(threadTs ? { thread_ts: threadTs } : {}),
     });
+    return typeof res.ts === 'string' ? res.ts : undefined;
   }
 
   /**

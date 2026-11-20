@@ -1,17 +1,21 @@
 import assert from 'node:assert/strict';
 import { afterEach, test } from 'node:test';
 
-import type { IncomingTurn } from '@omadia/channel-sdk';
+import type { ConversationMessageEvent, IncomingTurn } from '@omadia/channel-sdk';
 
 import type { SlackSlashCommandPayload } from '../src/inbound.js';
-import { SlackChannel, validResponseUrl, type AccessPolicy } from '../src/slackChannel.js';
+import { SlackChannel, validResponseUrl, type AccessPolicy, type SlackChannelDeps } from '../src/slackChannel.js';
 import { createChannelState } from '../src/state.js';
 
 const URL_OK = 'https://hooks.slack.com/commands/T1/1/x';
 
 type InfoCall = { user: string; include_locale?: boolean };
 
-function make(policy: Partial<AccessPolicy> = {}, info: (args: InfoCall) => Promise<unknown> = async () => ({ user: {} })) {
+function make(
+  policy: Partial<AccessPolicy> = {},
+  info: (args: InfoCall) => Promise<unknown> = async () => ({ user: {} }),
+  extra: Partial<Pick<SlackChannelDeps, 'emitMessage' | 'deliveryOf'>> = {},
+) {
   const turns: IncomingTurn[] = [];
   const reactions: unknown[] = [];
   const channel = new SlackChannel({
@@ -21,7 +25,10 @@ function make(policy: Partial<AccessPolicy> = {}, info: (args: InfoCall) => Prom
     state: createChannelState(),
     policy: { respondInChannels: 'mention', allowDms: true, allowlist: new Set(), ...policy },
     onMessage: async (t) => void turns.push(t),
+    ...extra,
   });
+  // `init()` would learn the bot's own member id from Slack; the tests state it.
+  (channel as unknown as { botUserId: string }).botUserId = 'UBOT';
   // Any reaction would go through the Web client: record it.
   const web = (channel as unknown as { web: { reactions?: { add: (a: unknown) => Promise<void> } } }).web;
   if (web.reactions) web.reactions.add = async (a) => void reactions.push(a);
@@ -127,4 +134,90 @@ test('a failing profile lookup never drops the turn: German notices, id principa
   await channel.ingest({ type: 'app_mention', channel: 'C1', user: 'U1', text: 'a', ts: '1.1' }, 'T1');
   assert.equal(turns.length, 1);
   assert.equal(turns[0]?.userRef.email, undefined);
+});
+
+function emitting(policy: Partial<AccessPolicy> = {}, deliveryOf?: SlackChannelDeps['deliveryOf']) {
+  const events: ConversationMessageEvent[] = [];
+  const made = make(policy, undefined, { emitMessage: (e) => void events.push(e), ...(deliveryOf ? { deliveryOf } : {}) });
+  return { ...made, events };
+}
+
+test('a thread reply is emitted as a created message with replyToMessageId, keyed by the bot identity', async () => {
+  const { channel, events } = emitting();
+  await channel.ingest({ type: 'message', channel: 'C1', user: 'U1', text: '2', ts: '200.2', thread_ts: '100.1', channel_type: 'channel' }, 'T1');
+  assert.equal(events.length, 1);
+  assert.deepEqual(
+    { ...events[0], occurredAt: undefined },
+    {
+      channelId: 'slack-1',
+      channelType: 'slack',
+      conversationId: 'C1',
+      conversationType: 'group',
+      receivedByChannelKey: '@UBOT',
+      messageId: '200.2',
+      revision: 0,
+      kind: 'created',
+      author: { kind: 'slack-user', id: 'U1' },
+      tenantId: 'T1',
+      text: '2',
+      replyToMessageId: '100.1',
+      occurredAt: undefined,
+    },
+  );
+  assert.equal(events[0]?.occurredAt, new Date(200_200).toISOString());
+});
+
+test('a top-level message has no replyToMessageId and a thread root is not a reply to itself', async () => {
+  const { channel, events } = emitting();
+  await channel.ingest({ type: 'message', channel: 'C1', user: 'U1', text: 'a', ts: '300.1', channel_type: 'channel' }, 'T1');
+  await channel.ingest({ type: 'message', channel: 'C1', user: 'U1', text: 'b', ts: '300.2', thread_ts: '300.2', channel_type: 'channel' }, 'T1');
+  assert.deepEqual(events.map((e) => e.replyToMessageId), [undefined, undefined]);
+});
+
+test('a mention of the bot sets addressedToBot, a plain message does not; the bot mention is stripped from the text', async () => {
+  const { channel, events, turns } = emitting();
+  await channel.ingest({ type: 'app_mention', channel: 'C1', user: 'U1', text: '<@UBOT> Antwort 2', ts: '1.1', channel_type: 'channel' }, 'T1');
+  await channel.ingest({ type: 'message', channel: 'C1', user: 'U1', text: 'hey <@UBOT> 3', ts: '1.2', channel_type: 'channel' }, 'T1');
+  await channel.ingest({ type: 'message', channel: 'C1', user: 'U2', text: 'nur so', ts: '1.3', channel_type: 'channel' }, 'T1');
+  assert.deepEqual(events.map((e) => e.addressedToBot), [true, true, undefined]);
+  assert.equal(events[0]?.text, 'Antwort 2');
+  assert.equal(events.length, 3, 'also the message that starts no turn is recorded');
+  assert.equal(turns.length, 1, 'the mention gate still decides on turns');
+});
+
+test('the mention delivered twice (app_mention and message) is emitted once', async () => {
+  const { channel, events } = emitting();
+  await channel.ingest({ type: 'message', channel: 'C1', user: 'U1', text: '<@UBOT> x', ts: '5.5', channel_type: 'channel' }, 'T1');
+  await channel.ingest({ type: 'app_mention', channel: 'C1', user: 'U1', text: '<@UBOT> x', ts: '5.5', channel_type: 'channel' }, 'T1');
+  assert.equal(events.length, 1);
+});
+
+test('nothing is emitted without emitConversationMessage, and the turn is unaffected', async () => {
+  const { channel, turns } = make();
+  await channel.ingest({ type: 'app_mention', channel: 'C1', user: 'U1', text: 'hi', ts: '1.1' }, 'T1');
+  assert.equal(turns.length, 1);
+});
+
+test('nothing is emitted when the kernel hands the bot nothing of the conversation, with the bot key asked', async () => {
+  const asked: string[] = [];
+  const { channel, events } = emitting({}, (conversation, key) => (asked.push(`${conversation}/${key}`), 'none'));
+  await channel.ingest({ type: 'message', channel: 'C1', user: 'U1', text: 'x', ts: '1.1', channel_type: 'channel' }, 'T1');
+  assert.deepEqual(events, []);
+  assert.deepEqual(asked, ['C1/@UBOT']);
+});
+
+test('slash commands, disabled DMs and non-allowlisted channels are not emitted', async () => {
+  const cmd = emitting();
+  await cmd.channel.ingestCommand(command());
+  const dm = emitting({ allowDms: false });
+  await dm.channel.ingest({ type: 'message', channel: 'D1', user: 'U1', text: 'x', ts: '1.1', channel_type: 'im' }, 'T1');
+  const listed = emitting({ allowlist: new Set(['C9']) });
+  await listed.channel.ingest({ type: 'message', channel: 'C1', user: 'U1', text: 'x', ts: '1.1', channel_type: 'channel' }, 'T1');
+  assert.deepEqual([cmd.events.length, dm.events.length, listed.events.length], [0, 0, 0]);
+});
+
+test('a DM is emitted as a direct conversation', async () => {
+  const { channel, events } = emitting();
+  await channel.ingest({ type: 'message', channel: 'D1', user: 'U1', text: '1', ts: '1.1', channel_type: 'im' }, 'T1');
+  assert.equal(events[0]?.conversationType, 'direct');
 });

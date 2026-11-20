@@ -87,6 +87,16 @@ export async function activate(ctx: PluginContext, core: CoreApi): Promise<Chann
     state,
     policy: { respondInChannels, allowDms, allowlist },
     onMessage: (turn) => handleSlackTurn(turnDeps(), turn),
+    // Message record for the kernel (typed answers to a poll). Feature-detected.
+    ...(core.emitConversationMessage
+      ? { emitMessage: (event) => core.emitConversationMessage?.(event) }
+      : {}),
+    ...(core.conversationDelivery
+      ? {
+          deliveryOf: (conversationId, channelKey) =>
+            core.conversationDelivery?.(SLACK_CHANNEL_TYPE, conversationId, channelKey) ?? 'none',
+        }
+      : {}),
   });
   outbox = new SlackOutbox(channel);
 

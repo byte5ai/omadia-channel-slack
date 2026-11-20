@@ -12,7 +12,7 @@ import { renderSlackAnswer } from './renderer.js';
 /** The two ways bytes leave this plugin towards Slack. */
 export interface SlackSink {
   /** `chat.postMessage` into a conversation, optionally under a thread. */
-  sendText(channel: string, text: string, threadTs?: string): Promise<void>;
+  sendText(channel: string, text: string, threadTs?: string): Promise<string | undefined>;
   /** Answer a slash command ephemerally through its `response_url`. */
   replyToCommand(responseUrl: string, text: string): Promise<void>;
   /** `chat.postEphemeral`: only `user` sees it. For a command's follow-up once its `response_url` has expired. */
@@ -71,20 +71,29 @@ export class SlackOutbox {
 
   /** Render and send one answer. Returns false when there was nothing to say. */
   async deliver(answer: SemanticAnswer, target: DeliveryTarget): Promise<boolean> {
+    return (await this.deliverMessage(answer, target)).sent;
+  }
+
+  /**
+   * {@link deliver} that also reports the Slack `ts` of a message posted into
+   * a conversation (what a later reply points at); ephemeral replies have none.
+   */
+  async deliverMessage(answer: SemanticAnswer, target: DeliveryTarget): Promise<{ sent: boolean; messageId?: string }> {
     const text = renderSlackAnswer(answer, {
       nativeIdentity: this.nativeIdentity,
       conversationKey: target.conversationKey,
       speakerHistory: this.speakerHistory,
     });
-    if (text.length === 0) return false;
+    if (text.length === 0) return { sent: false };
+    let messageId: string | undefined;
     if (target.responseUrl && target.followUp && target.commandUserId) {
       await this.sink.sendEphemeral(target.conversationId, target.commandUserId, text);
     } else if (target.responseUrl && !target.followUp) {
       await this.sink.replyToCommand(target.responseUrl, text);
     } else {
-      await this.sink.sendText(target.conversationId, text, target.threadTs);
+      messageId = await this.sink.sendText(target.conversationId, text, target.threadTs);
     }
-    return true;
+    return { sent: true, ...(messageId ? { messageId } : {}) };
   }
 
   /**
