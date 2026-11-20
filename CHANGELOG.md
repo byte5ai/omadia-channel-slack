@@ -23,6 +23,8 @@ plugin runs its own app only, as before.
 - **Sends and rosters per app**: the providers declare `asChannelKey` and post
   through exactly the app named (unknown key: unreachable); `presentIn` tells
   the kernel which agent apps are members of a conversation.
+- **`compat.core` `>=1.79.0 <2.0`** (placeholder): needs the kernel with agent
+  channel identities (S7). The parent session sets the final range on release.
 
 ## 0.3.0
 

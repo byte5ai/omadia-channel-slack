@@ -34,7 +34,10 @@ identity:
     - "communication"
 
 compat:
-  core: ">=1.75.0 <2.0"                    # placeholder: S6 lands with plugin-api 1.75.0; the parent session confirms the number before publish
+  # Placeholder for the kernel that ships agent channel identities (S7: the
+  # SDK's registerAgentIdentityProvider, asChannelKey per bot, agent_own_bot).
+  # Expected plugin-api 1.79.0; the parent session sets the final range when it lands.
+  core: ">=1.79.0 <2.0"
   node: ">=20"
 
 depends_on: []
