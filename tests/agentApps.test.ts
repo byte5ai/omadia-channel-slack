@@ -39,7 +39,7 @@ function app(member: string, sink = new RecordingSink(), member_of = true): Slac
     botKey: `slack-bot:${member.toLowerCase()}`,
     botUserId: member,
     name: `bot-${member}`,
-    send: { outbox: new SlackOutbox(sink, undefined, true), users },
+    send: { outbox: new SlackOutbox(sink, undefined, true), users, reactions: { addReaction: async () => undefined } },
     roster: { channelType: 'slack', getRoster: async () => undefined },
     isMemberOf: async () => member_of,
     status: () => 'connected' as const,
@@ -65,7 +65,7 @@ function vault() {
 function rig(mode: 'webhook' | 'socket', checkToken: (t: string) => Promise<SlackBotIdentity>, sink = new RecordingSink()) {
   const fleet = new SlackAppFleet({
     channelKey: () => 'slack-bot:udefault',
-    send: { outbox: new SlackOutbox(sink), users },
+    send: { outbox: new SlackOutbox(sink), users, reactions: { addReaction: async () => undefined } },
     roster: { channelType: 'slack', getRoster: async () => undefined },
     botToken: DEFAULT_TOKEN,
   });

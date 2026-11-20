@@ -64,10 +64,14 @@ test('emitter paths are counted: the outbox is the only caller of the sink, the 
   }
 });
 
-test('no receipt reaction exists any more (spec 5.14)', () => {
+test('no receipt reaction exists any more (spec 5.14): the only reaction is the kernel\'s react, through addReaction', () => {
   for (const { file, code } of sources()) {
-    assert.ok(!/reactions\.add|sendReaction|ACK_EMOJI/.test(code), `${file} still sends a reaction`);
+    assert.ok(!/sendReaction|ACK_EMOJI/.test(code), `${file} still sends a receipt reaction`);
+    // `reactions.add` lives in the channel's addReaction only; only the send provider calls that.
+    assert.equal(count(code, /\breactions\.add\(/g), file === 'slackChannel.ts' ? 1 : 0, `${file}: reactions.add`);
+    assert.equal(count(code, /\.addReaction\(/g), file === 'slackSendProviders.ts' ? 1 : 0, `${file}: addReaction calls`);
   }
+  // The scope is back for the kernel's bot reaction (spec 2043 §5.14), not for a receipt.
   const manifest = readFileSync(join(srcDir, '..', 'manifest.yaml'), 'utf8');
-  assert.ok(!manifest.includes('reactions:write'), 'manifest still asks for reactions:write');
+  assert.ok(manifest.includes('reactions:write'), 'manifest lists reactions:write for the kernel reaction');
 });

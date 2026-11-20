@@ -16,6 +16,7 @@ import {
   type TurnSource,
 } from './inbound.js';
 import type { SlackSink } from './outbox.js';
+import type { SlackReactor } from './slackSendProviders.js';
 import { makeSlackLogger, type LogSink } from './logger.js';
 import { patchState, type ChannelState } from './state.js';
 
@@ -96,11 +97,12 @@ const MEMBERS_PAGE_SIZE = 200;
  * {@link ingest} (messages) or {@link ingestCommand} (the `/agent` slash
  * command), so the filtering, loop-guard and reply path are identical
  * regardless of how the event arrived. The channel sends no receipt reaction:
- * an undeclared decoration (spec 2042 §5.14); Slack has no typing indicator
+ * an undeclared decoration (spec 2042 §5.14); the only reaction is the one the
+ * kernel asks for through the conversation provider ({@link addReaction}); Slack has no typing indicator
  * for a bot outside its AI-assistant surface, so there is nothing to show
  * while the answer is being prepared.
  */
-export class SlackChannel implements SlackSink {
+export class SlackChannel implements SlackSink, SlackReactor {
   private readonly web: WebClient;
   private botUserId = '';
   private readonly profiles = new Map<string, { profile: SlackSenderProfile; expiresAt: number }>();
@@ -439,6 +441,15 @@ export class SlackChannel implements SlackSink {
       ...(threadTs ? { thread_ts: threadTs } : {}),
     });
     return typeof res.ts === 'string' ? res.ts : undefined;
+  }
+
+  /**
+   * `reactions.add` (bot scope `reactions:write`): this app's `name` emoji on
+   * the message `timestamp` of `channel`. Only the kernel's `react` calls it
+   * (spec 2043 §5.14); throws the Web API error (with `data.error`).
+   */
+  async addReaction(channel: string, timestamp: string, name: string): Promise<void> {
+    await this.web.reactions.add({ channel, timestamp, name });
   }
 
   /**

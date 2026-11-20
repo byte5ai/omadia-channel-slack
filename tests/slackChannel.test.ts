@@ -295,3 +295,9 @@ test('a DM is a turn case too: a consumed typed answer in a DM starts no turn', 
   await channel.ingest({ type: 'message', channel: 'D1', user: 'U1', text: '1', ts: '2.2', channel_type: 'im' }, 'T1');
   assert.equal(turns.length, 0);
 });
+
+test('addReaction calls reactions.add as this app with the channel, the message ts and the emoji name', async () => {
+  const { channel, reactions } = make();
+  await channel.addReaction('C1', '1701.0001', '+1');
+  assert.deepEqual(reactions, [{ channel: 'C1', timestamp: '1701.0001', name: '+1' }]);
+});
