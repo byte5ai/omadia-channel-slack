@@ -34,7 +34,7 @@ identity:
     - "communication"
 
 compat:
-  core: ">=1.0 <2.0"
+  core: ">=1.74.0 <2.0"                    # placeholder: the S1 resolver contract (bound|reject, speaker, principal helper); the parent session sets the final range
   node: ">=20"
 
 depends_on: []
