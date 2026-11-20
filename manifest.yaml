@@ -21,7 +21,7 @@ identity:
   kind: "channel"
   domain: "slack"
   name: "Slack"
-  version: "0.3.0"                         # === package.json "version"
+  version: "0.4.0"                         # === package.json "version"
   description: "Slack-Channel via Events API (Webhook, prod-empfohlen) oder Socket Mode (Fallback ohne Public-Host). Routet Slack-DMs und @Mentions in den Omadia-Orchestrator."
   authors:
     - name: "byte5 GmbH"
@@ -34,9 +34,9 @@ identity:
     - "communication"
 
 compat:
-  # Placeholder for the kernel that ships agent channel identities (S7: the
-  # SDK's registerAgentIdentityProvider, asChannelKey per bot, agent_own_bot).
-  # Expected plugin-api 1.79.0; the parent session sets the final range when it lands.
+  # The kernel that ships agent channel identities (plugin-api 1.79.0, S7):
+  # registerAgentIdentityProvider, asChannelKey per bot, agent_own_bot, the
+  # proactive send's speaker and disposer, RoutineTurnInput.conductorBinding.
   core: ">=1.79.0 <2.0"
   node: ">=20"
 
