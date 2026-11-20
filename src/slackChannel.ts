@@ -6,10 +6,14 @@ import type { IncomingTurn } from '@omadia/channel-sdk';
 
 import {
   buildIncomingTurn,
+  commandToEvent,
   extractText,
   stripMention,
   type SlackMessageEvent,
+  type SlackSlashCommandPayload,
+  type TurnSource,
 } from './inbound.js';
+import type { SlackSink } from './outbox.js';
 import { makeSlackLogger, type LogSink } from './logger.js';
 import { patchState, type ChannelState } from './state.js';
 
@@ -31,9 +35,8 @@ export interface SlackChannelDeps {
   onMessage: (turn: IncomingTurn) => Promise<void>;
 }
 
-/** Reaction posted on every accepted message — OpenClaw-style — so the user
- *  sees their message was picked up before the (slower) answer arrives. */
-const ACK_EMOJI = 'eyes';
+/** `response_url`s are minted by Slack on this domain; anything else is refused. */
+const RESPONSE_URL_HOST_SUFFIX = '.slack.com';
 
 /** Cap on the dedup set of handled message keys. */
 const HANDLED_KEYS_MAX = 1_000;
@@ -45,15 +48,22 @@ const USERS_CACHE_TTL_MS = 5 * 60 * 1000;
 const USERS_PAGE_SIZE = 200;
 const USERS_CACHE_MAX = 2_000;
 
+/** `conversations.members` page size (Slack allows up to 1000; 200 is the documented default). */
+const MEMBERS_PAGE_SIZE = 200;
+
 /**
  * Transport-agnostic Slack channel core. Owns the {@link WebClient} (outbound
  * Web API + identity), the inbound de-duplication + access policy, and the
  * native-event → {@link IncomingTurn} translation. Both transports
  * (Socket Mode and the Events API webhook) funnel every inbound payload through
- * {@link ingest}, so the filtering, loop-guard, ACK reaction and reply path are
- * identical regardless of how the event arrived.
+ * {@link ingest} (messages) or {@link ingestCommand} (the `/agent` slash
+ * command), so the filtering, loop-guard and reply path are identical
+ * regardless of how the event arrived. The channel sends no receipt reaction:
+ * an undeclared decoration (spec 2042 §5.14); Slack has no typing indicator
+ * for a bot outside its AI-assistant surface, so there is nothing to show
+ * while the answer is being prepared.
  */
-export class SlackChannel {
+export class SlackChannel implements SlackSink {
   private readonly web: WebClient;
   private botUserId = '';
   private usersCache: { users: SlackDirectoryUser[]; truncated: boolean; fetchedAt: number } | undefined;
@@ -92,9 +102,32 @@ export class SlackChannel {
   /**
    * Process one inbound Slack event (a `message` or `app_mention`). Idempotent
    * per `${channel}:${ts}`. Applies the loop-guard, access policy and allowlist,
-   * then ACKs with a reaction and drives an orchestrator turn.
+   * then drives an orchestrator turn.
    */
   async ingest(event: SlackMessageEvent, teamId: string | undefined): Promise<void> {
+    await this.process(event, teamId, {});
+  }
+
+  /**
+   * Process a native slash command (`/agent`, `/agents`). The text is handed
+   * to the kernel unchanged as an ordinary inbound message (the kernel's
+   * management layer parses it and answers with a `system` notice); the answer
+   * goes back ephemerally through the command's `response_url`, so choosing an
+   * agent does not clutter the channel. A command is an explicit address, so
+   * it passes the channel-mention policy; DM and allowlist policy still apply.
+   */
+  async ingestCommand(payload: SlackSlashCommandPayload): Promise<void> {
+    const event = commandToEvent(payload);
+    if (!event) return;
+    const responseUrl = validResponseUrl(payload.response_url);
+    await this.process(event, payload.team_id, { command: responseUrl ? { responseUrl } : {} });
+  }
+
+  private async process(
+    event: SlackMessageEvent,
+    teamId: string | undefined,
+    source: TurnSource,
+  ): Promise<void> {
     const key = `${event.channel}:${event.ts}`;
     if (this.handledKeys.has(key)) return;
     this.handledKeys.add(key);
@@ -113,19 +146,19 @@ export class SlackChannel {
       const channelType = event.channel_type ?? 'channel';
       const isDm = channelType === 'im';
 
-      // Access policy. An explicit @mention always passes (the user asked for
-      // the bot by name); plain messages are gated by DM / channel policy.
-      if (!isMention) {
-        if (isDm && !this.deps.policy.allowDms) {
-          this.deps.log('info', 'Slack inbound skipped: DMs disabled', { channel: event.channel });
-          return;
-        }
-        if (!isDm && this.deps.policy.respondInChannels !== 'all') {
-          this.deps.log('info', 'Slack inbound skipped: channel message without mention', {
-            channel: event.channel,
-          });
-          return;
-        }
+      // Access policy. An explicit @mention (or slash command) always passes
+      // the channel policy (the user asked for the bot by name); plain
+      // messages are gated by DM / channel policy. Direct messages can be
+      // switched off for commands too.
+      if (isDm && !this.deps.policy.allowDms) {
+        this.deps.log('info', 'Slack inbound skipped: DMs disabled', { channel: event.channel });
+        return;
+      }
+      if (!isMention && !isDm && this.deps.policy.respondInChannels !== 'all') {
+        this.deps.log('info', 'Slack inbound skipped: channel message without mention', {
+          channel: event.channel,
+        });
+        return;
       }
 
       // Allowlist by channel id and/or user id.
@@ -153,12 +186,11 @@ export class SlackChannel {
         channel: event.channel,
         channelType,
         isMention,
+        ...(source.command ? { command: true } : {}),
       });
       patchState(this.deps.state, { lastInboundAt: Date.now() });
 
-      // ACK first (OpenClaw-style) so the user immediately sees it was picked up.
-      void this.sendReaction(event.channel, event.ts, ACK_EMOJI);
-      await this.deps.onMessage(buildIncomingTurn(this.deps.channelId, event, text, teamId));
+      await this.deps.onMessage(buildIncomingTurn(this.deps.channelId, event, text, teamId, source));
     } catch (err) {
       this.deps.log('error', 'error handling inbound Slack message', {
         channel: event.channel,
@@ -227,14 +259,58 @@ export class SlackChannel {
     });
   }
 
-  /** Add an emoji reaction (ACK). Best-effort — never throws into the caller. */
-  async sendReaction(channel: string, timestamp: string, name: string): Promise<void> {
-    try {
-      await this.web.reactions.add({ channel, timestamp, name });
-    } catch (err) {
-      // `already_reacted` and missing-scope are common + harmless here.
-      this.deps.log('warn', 'failed to add Slack reaction', { error: errMessage(err) });
-    }
+  /**
+   * Answer a slash command ephemerally (only the person who typed it sees the
+   * reply) through its one-shot `response_url`. Throws on a refused URL or a
+   * non-2xx answer so the caller's error path runs.
+   */
+  async replyToCommand(responseUrl: string, text: string): Promise<void> {
+    const url = validResponseUrl(responseUrl);
+    if (!url) throw new Error('refusing a slash-command response_url that is not a Slack https URL');
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ response_type: 'ephemeral', text, mrkdwn: true }),
+    });
+    if (!res.ok) throw new Error(`slash-command response_url answered HTTP ${String(res.status)}`);
+  }
+
+  /** `chat.postEphemeral`: visible to `user` only. */
+  async sendEphemeral(channel: string, user: string, text: string): Promise<void> {
+    await this.web.chat.postEphemeral({ channel, user, text, mrkdwn: true } as Parameters<WebClient['chat']['postEphemeral']>[0]);
+  }
+
+  /**
+   * Member ids of a conversation (`conversations.members`), paged. Needs the
+   * `channels:read` / `groups:read` / `im:read` / `mpim:read` bot scopes that
+   * match the conversation type. Stops at `max` ids and says so. Throws the
+   * Web API error (with `data.error`) so the roster provider can report why.
+   */
+  async conversationMembers(
+    channel: string,
+    max: number,
+  ): Promise<{ memberIds: string[]; truncated: boolean }> {
+    const memberIds: string[] = [];
+    let cursor: string | undefined;
+    do {
+      const page = await this.web.conversations.members({
+        channel,
+        limit: Math.min(MEMBERS_PAGE_SIZE, max),
+        ...(cursor ? { cursor } : {}),
+      });
+      for (const id of page.members ?? []) memberIds.push(id);
+      cursor = page.response_metadata?.next_cursor || undefined;
+      if (memberIds.length >= max) {
+        const truncated = memberIds.length > max || cursor !== undefined;
+        return { memberIds: memberIds.slice(0, max), truncated };
+      }
+    } while (cursor);
+    return { memberIds, truncated: false };
+  }
+
+  /** The bot's own member id, once `init()` has run (empty before). */
+  get selfUserId(): string {
+    return this.botUserId;
   }
 
   private trimHandledKeys(): void {
@@ -244,6 +320,18 @@ export class SlackChannel {
       this.handledKeys.delete(old);
       if (--drop <= 0) break;
     }
+  }
+}
+
+/** A Slack-minted `response_url` (https, `*.slack.com`), or `undefined`. */
+export function validResponseUrl(raw: string | undefined): string | undefined {
+  if (!raw) return undefined;
+  try {
+    const url = new URL(raw);
+    const isSlack = url.hostname === 'slack.com' || url.hostname.endsWith(RESPONSE_URL_HOST_SUFFIX);
+    return url.protocol === 'https:' && isSlack ? url.toString() : undefined;
+  } catch {
+    return undefined;
   }
 }
 

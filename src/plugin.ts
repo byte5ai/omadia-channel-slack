@@ -3,23 +3,20 @@ import { fileURLToPath } from 'node:url';
 
 import * as channelSdk from '@omadia/channel-sdk';
 import {
-  isNoReply,
-  logNoReplyDrop,
   type ChatAgent,
   type ChannelHandle,
   type CoreApi,
-  type IncomingTurn,
 } from '@omadia/channel-sdk';
 import type { PluginContext } from '@omadia/plugin-api';
 
 import { createAdminRouter } from './adminRouter.js';
 import { createEventsApiRouter } from './eventsApiTransport.js';
-import type { SlackTurnMeta } from './inbound.js';
-import { renderAnswer } from './renderer.js';
+import { SlackOutbox } from './outbox.js';
 import { SlackChannel } from './slackChannel.js';
 import { createSlackPeopleDirectoryProvider } from './slackPeopleDirectory.js';
 import { SocketModeTransport } from './socketModeTransport.js';
 import { createChannelState, patchState } from './state.js';
+import { handleSlackTurn, type TurnDeps } from './turn.js';
 
 const EVENTS_ROUTE_PREFIX = '/api/slack';
 const EVENTS_PATH = `${EVENTS_ROUTE_PREFIX}/events`;
@@ -67,16 +64,25 @@ export async function activate(ctx: PluginContext, core: CoreApi): Promise<Chann
 
   // `let channel!` so the onMessage closure can reference the instance it is
   // attached to; the closure only fires once messages arrive (long after
-  // construction), by which time `channel` is assigned.
+  // construction), by which time `channel` is assigned. The outbox is the one
+  // emitter of everything this channel says to a user (see outbox.ts).
   let channel!: SlackChannel;
+  let outbox!: SlackOutbox;
+  const turnDeps = (): TurnDeps => ({
+    services: ctx.services,
+    defaultAgent: agent,
+    outbox,
+    log: (level, message, context) => core.log(level, message, context),
+  });
   channel = new SlackChannel({
     channelId,
     botToken,
     log: (level, message, context) => core.log(level, message, context),
     state,
     policy: { respondInChannels, allowDms, allowlist },
-    onMessage: (turn) => handleTurn(ctx, agent, core, channel, turn),
+    onMessage: (turn) => handleSlackTurn(turnDeps(), turn),
   });
+  outbox = new SlackOutbox(channel);
 
   // People directory (Conductor human steps resolve "Max Mustermann" → his Slack
   // member id, which IS the channel binding key). Feature-detected: older kernels
@@ -186,54 +192,6 @@ async function initWebhook(channel: SlackChannel, core: CoreApi, state: ReturnTy
   }
 }
 
-/** Drive one orchestrator turn and ship the rendered answer back to Slack. */
-async function handleTurn(
-  ctx: PluginContext,
-  defaultAgent: ChatAgent,
-  core: CoreApi,
-  channel: SlackChannel,
-  turn: IncomingTurn,
-): Promise<void> {
-  const meta = turn.metadata as unknown as SlackTurnMeta;
-  // US7 — route to the Agent bound to this Slack channel (per-channel), else
-  // the workspace-level binding (teamId), else the platform fallback, else the
-  // default.
-  const agent = resolveAgentForTurn(
-    ctx,
-    'slack',
-    [turn.conversationId, meta.teamId],
-    defaultAgent,
-  );
-  try {
-    const answer = await agent.chat({
-      userMessage: turn.text,
-      sessionScope: meta.sessionScope,
-      userId: turn.userRef.id,
-    });
-    if (isNoReply(answer)) {
-      logNoReplyDrop(turn.channelId, { conversationId: turn.conversationId });
-      return;
-    }
-    const text = renderAnswer(answer);
-    if (text.trim().length === 0) return;
-    await channel.sendText(turn.conversationId, text, meta.threadTs);
-  } catch (err) {
-    core.log('error', 'failed to handle Slack turn', {
-      error: (err as Error).message,
-      conversationId: turn.conversationId,
-    });
-    try {
-      await channel.sendText(
-        turn.conversationId,
-        '⚠️ Entschuldigung, dabei ist ein Fehler aufgetreten. Bitte versuche es erneut.',
-        meta.threadTs,
-      );
-    } catch {
-      /* original error already logged — don't mask it with a send failure */
-    }
-  }
-}
-
 /**
  * Resolve the orchestrator's {@link ChatAgent}. Prefers the SDK helper
  * `getChatAgent(ctx)` (the blessed, typed path); falls back to the raw
@@ -247,55 +205,6 @@ function resolveChatAgent(ctx: PluginContext): ChatAgent | undefined {
     .getChatAgent;
   if (helper) return helper(ctx);
   return ctx.services.get<{ agent: ChatAgent }>('chatAgent')?.agent;
-}
-
-/**
- * Structural view of the kernel's `channelResolver@1` — the per-binding router
- * published by the multi-orchestrator runtime. Consumed directly (not via a
- * new SDK export) so this plugin keeps running on hosts whose
- * `@omadia/channel-sdk` predates the US7 helper; the service itself is what the
- * helper wraps.
- */
-interface ChannelBindingResolver {
-  resolve(
-    channelType: string,
-    channelKey: string,
-  ): { readonly decision: 'bound' | 'fallback' | 'reject'; readonly chatAgent?: ChatAgent };
-}
-
-const CHANNEL_RESOLVER_SERVICE = 'channelResolver';
-
-/**
- * US7 per-turn Agent resolution. Routes a turn to the Agent the operator bound
- * to its `(channelType, channelKey)` via `channelResolver@1`, falling back to
- * `defaultAgent` when no binding (and no platform fallback Agent) matches OR
- * the resolver is not published (single-Agent / pre-US7 host). `channelKeys`
- * are tried most-specific first: a `bound` decision wins immediately, a
- * `fallback` is remembered and used only if no key is explicitly bound.
- * Resolver errors are swallowed (default agent used) so a hiccup never drops a
- * turn. Without this, every turn reaches the shared, fully-tooled singleton
- * regardless of which Agent the channel is bound to.
- */
-function resolveAgentForTurn(
-  ctx: PluginContext,
-  channelType: string,
-  channelKeys: ReadonlyArray<string | null | undefined>,
-  defaultAgent: ChatAgent,
-): ChatAgent {
-  const resolver = ctx.services.get<ChannelBindingResolver>(CHANNEL_RESOLVER_SERVICE);
-  if (!resolver) return defaultAgent;
-  let fallback: ChatAgent | undefined;
-  try {
-    for (const key of channelKeys) {
-      if (!key) continue;
-      const decision = resolver.resolve(channelType, key);
-      if (decision.decision === 'bound' && decision.chatAgent) return decision.chatAgent;
-      if (decision.decision === 'fallback' && decision.chatAgent) fallback ??= decision.chatAgent;
-    }
-  } catch {
-    return defaultAgent;
-  }
-  return fallback ?? defaultAgent;
 }
 
 /** Parse the comma-separated allowlist into a set of Slack channel / user ids. */
