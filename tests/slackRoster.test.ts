@@ -97,3 +97,32 @@ test('a blank conversation id is not resolvable', async () => {
   const provider = createSlackRosterProvider({ channel: source(async () => ({ memberIds: [], truncated: false })), log: () => undefined });
   assert.equal(await provider.getRoster('  '), undefined);
 });
+
+test('a join within the cache lifetime: the fresh query sees it, and a membership event drops the cached read', async () => {
+  let members = ['U1', 'U2', 'UBOT'];
+  const src = source(async () => ({ memberIds: members, truncated: false }));
+  const provider = createSlackRosterProvider({ channel: src, log: () => undefined, now: () => 0 });
+  await provider.getRoster('C1');
+  members = [...members, 'U3'];
+  assert.equal((await provider.getRoster('C1'))?.participants.length, 3, 'a cached read within the lifetime');
+  const fresh = await provider.getRoster('C1', { fresh: true });
+  assert.deepEqual(fresh?.participants.map((p) => p.userRef.id), ['U1', 'U2', 'UBOT', 'U3']);
+  assert.equal(fresh ? rosterStatusOf(fresh) : undefined, 'complete');
+  members = members.filter((id) => id !== 'U2');
+  provider.forget('C1');
+  assert.deepEqual((await provider.getRoster('C1'))?.participants.map((p) => p.userRef.id), ['U1', 'UBOT', 'U3']);
+});
+
+test('a read that fails on a later page is unknown, never complete, and the earlier read is not reported instead', async () => {
+  let fail = false;
+  const src = source(async () => {
+    if (fail) throw apiError('ratelimited');
+    return { memberIds: ['U1'], truncated: false };
+  });
+  const provider = createSlackRosterProvider({ channel: src, log: () => undefined, now: () => 0 });
+  await provider.getRoster('C1');
+  fail = true;
+  const fresh = await provider.getRoster('C1', { fresh: true });
+  assert.equal(fresh ? rosterStatusOf(fresh) : undefined, 'unknown');
+  assert.deepEqual(fresh?.participants, []);
+});
