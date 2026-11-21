@@ -31,7 +31,8 @@ export interface SlackMessageEvent {
 export interface SlackEnvelopeBody {
   type: string; // 'events_api' for the events we care about
   team_id?: string;
-  event?: SlackMessageEvent;
+  /** Untyped JSON: `routeSlackEvent` narrows it (messages, edits, reactions, membership). */
+  event?: unknown;
 }
 
 /**

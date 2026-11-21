@@ -4,6 +4,7 @@ import { SocketModeClient } from '@slack/socket-mode';
 import { makeSlackLogger, type LogSink } from './logger.js';
 import type { SlackChannel } from './slackChannel.js';
 import { errMessage } from './slackChannel.js';
+import { routeSlackEvent } from './eventRouter.js';
 import type { SlackEnvelopeBody, SlackSlashCommandPayload } from './inbound.js';
 import { patchState, type ChannelState } from './state.js';
 
@@ -19,7 +20,7 @@ export interface SocketModeTransportDeps {
  * endpoint required). Best for local dev and behind-firewall installs; Slack
  * recommends the Events API (webhook) for highest production reliability and
  * Marketplace distribution. A single generic `slack_event` listener ACKs every
- * envelope and funnels message/app_mention payloads into {@link SlackChannel.ingest}
+ * envelope and funnels Events API payloads through {@link routeSlackEvent}
  * and `/agent` slash commands into {@link SlackChannel.ingestCommand}.
  */
 export class SocketModeTransport {
@@ -64,7 +65,7 @@ export class SocketModeTransport {
       });
 
       // Single generic listener: ACK every envelope (so Slack never retries),
-      // then dispatch Events-API message/app_mention payloads and slash commands.
+      // then dispatch Events API payloads (routeSlackEvent) and slash commands.
       socket.on(
         'slack_event',
         async (args: { ack: () => Promise<void>; type?: string; body: unknown }) => {
@@ -127,7 +128,5 @@ export async function routeSocketEnvelope(
   }
   if (envelopeType !== 'events_api') return;
   const payload = body as SlackEnvelopeBody;
-  const event = payload.event;
-  if (!event || (event.type !== 'message' && event.type !== 'app_mention')) return;
-  await channel.ingest(event, payload.team_id);
+  await routeSlackEvent(channel, payload.event, payload.team_id);
 }

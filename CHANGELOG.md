@@ -1,5 +1,33 @@
 # Changelog
 
+## Unreleased
+
+Native facilitators in Slack (issue #6, spec 2043 §5.3, §5.5, §6.4).
+
+- **Readiness per conversation**: the plugin registers a `ChannelReadinessProvider`
+  (`registerReadinessProvider`, feature-detected). For the app `asChannelKey`
+  names it reports membership (`conversations.info`), whether the app may read
+  every message (the `*:history` scope of the conversation kind, from the
+  token's `auth.test` scopes) and whether it can post (`chat:write`, not
+  archived). Without scopes from Slack the report is `verified: false`. Before
+  this, the kernel treated no Slack conversation as ready.
+- **Edits, deletions and reactions** reach the kernel's message record
+  (`edited`, `deleted`, `reaction`) under the receiving app's key, following
+  the subscription (`conversationDelivery`), the DM policy and the allowlist.
+  They start no turn. Reactions need the optional bot scope `reactions:read`
+  and the `reaction_added` / `reaction_removed` events.
+- **Membership events**: `member_joined_channel` / `member_left_channel` become
+  `members_added` / `members_removed` (`emitConversationEvent`), the app's own
+  join `bot_added` with the inviter; the first human group message per
+  conversation emits `bot_present`. Subscribe the two `member_*` events.
+- **Roster**: a member joining or leaving drops the cached read; `fresh: true`
+  still always asks Slack, a failed read is `unknown`.
+- **Fix: a mention whose `message` event arrives before its `app_mention`**
+  started no turn (the duplicate check kept the first, unmentioned copy). A
+  message naming the bot is now a mention whichever copy comes first.
+- **Thread replies also sent to the channel** (`thread_broadcast`) and messages
+  with a file (`file_share`) count as new messages instead of being dropped.
+
 ## 0.5.0
 
 Bot reactions (spec 2043 §5.14, byte5ai/omadia#2061). Needs a kernel with

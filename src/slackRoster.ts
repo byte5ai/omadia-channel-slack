@@ -5,6 +5,7 @@ import type {
   ConversationRosterRequest,
 } from '@omadia/channel-sdk';
 
+import { conversationTypeOf } from './conversationEvents.js';
 import { SLACK_CHANNEL_TYPE } from './renderer.js';
 
 /** The slice of {@link SlackChannel} the roster needs. */
@@ -18,6 +19,12 @@ export interface SlackRosterDeps {
   log: (message: string) => void;
   /** Injected for tests. */
   now?: () => number;
+}
+
+/** The roster provider, plus a way to drop a conversation's cached read. */
+export interface SlackRosterProvider extends ConversationRosterProvider {
+  /** Members joined or left: the next read asks Slack again (also without `fresh`). */
+  forget(conversationId: string): void;
 }
 
 /** A roster read is reused this long; `fresh: true` bypasses it. */
@@ -35,11 +42,6 @@ const SCOPE_BY_PREFIX: Readonly<Record<string, string>> = {
   G: 'groups:read',
   D: 'im:read',
 };
-
-/** A Slack DM id starts with `D`; every other conversation is a group. */
-function conversationTypeOf(channelId: string): ConversationRoster['conversationType'] {
-  return channelId.startsWith('D') ? 'direct' : 'group';
-}
 
 function apiErrorCode(err: unknown): string | undefined {
   const data = (err as { data?: { error?: unknown } } | undefined)?.data;
@@ -87,10 +89,14 @@ function failureDetail(channelId: string, code: string | undefined): string {
  * The member list holds ids only, so `isBot` is stated for the bot itself
  * (`self`) and left open for everyone else: another app in the channel is
  * counted as a participant, the safe direction for an audience check.
+ * A read is cached for {@link ROSTER_CACHE_TTL_MS}; `fresh: true` always asks
+ * Slack, and a member joining or leaving drops the cached read
+ * ({@link SlackRosterProvider.forget}). A failed read is never cached and never
+ * `complete`: a failure on any page is `unknown`.
  * One provider per app: the plugin picks the app `asChannelKey` names before
  * it gets here (`SlackAppFleet.rosterProvider`).
  */
-export function createSlackRosterProvider(deps: SlackRosterDeps): ConversationRosterProvider {
+export function createSlackRosterProvider(deps: SlackRosterDeps): SlackRosterProvider {
   const now = deps.now ?? Date.now;
   const cache = new Map<string, { roster: ConversationRoster; at: number }>();
 
@@ -105,6 +111,9 @@ export function createSlackRosterProvider(deps: SlackRosterDeps): ConversationRo
 
   return {
     channelType: SLACK_CHANNEL_TYPE,
+    forget(conversationId: string): void {
+      cache.delete(conversationId.trim());
+    },
     async getRoster(conversationId: string, opts?: ConversationRosterRequest) {
       const channelId = conversationId.trim();
       if (!channelId) return undefined;

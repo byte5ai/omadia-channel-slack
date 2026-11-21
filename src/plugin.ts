@@ -24,7 +24,8 @@ import { SlackOutbox } from './outbox.js';
 import { SLACK_CHANNEL_TYPE } from './renderer.js';
 import { SlackChannel, slackBotChannelKey } from './slackChannel.js';
 import { createSlackPeopleDirectoryProvider } from './slackPeopleDirectory.js';
-import { createSlackRosterProvider } from './slackRoster.js';
+import { createSlackReadinessProvider } from './slackReadiness.js';
+import { createSlackRosterProvider, type SlackRosterProvider } from './slackRoster.js';
 import { createSlackSendProviders } from './slackSendProviders.js';
 import { SocketModeTransport } from './socketModeTransport.js';
 import { createChannelState, patchState } from './state.js';
@@ -94,6 +95,7 @@ export async function activate(ctx: PluginContext, core: CoreApi): Promise<Chann
     // attached to; the closure only fires once messages arrive.
     let channel!: SlackChannel;
     let outbox!: SlackOutbox;
+    let roster!: SlackRosterProvider;
     const turnDeps = (): TurnDeps => ({
       route: (key, context) => resolveChannelRoute(ctx, SLACK_CHANNEL_TYPE, key, context),
       defaultAgent: agent,
@@ -127,9 +129,14 @@ export async function activate(ctx: PluginContext, core: CoreApi): Promise<Chann
               core.conversationDelivery?.(SLACK_CHANNEL_TYPE, conversationId, channelKey) ?? 'none',
           }
         : {}),
+      // Members joining and leaving (and the bot added or present). Feature-detected.
+      ...(core.emitConversationEvent
+        ? { emitMembership: (event) => core.emitConversationEvent?.(event) }
+        : {}),
+      onMembershipChanged: (conversationId) => roster.forget(conversationId),
     });
     outbox = new SlackOutbox(channel, undefined, agentBot);
-    const roster = createSlackRosterProvider({ channel, log: (m) => core.log('warn', m) });
+    roster = createSlackRosterProvider({ channel, log: (m) => core.log('warn', m) });
     return { channel, outbox, roster, send: { outbox, users: channel, reactions: channel } };
   };
 
@@ -139,6 +146,7 @@ export async function activate(ctx: PluginContext, core: CoreApi): Promise<Chann
     channelKey: () => channel.channelKey(),
     send: own.send,
     roster: own.roster,
+    readiness: own.channel,
     botToken,
   });
 
@@ -159,6 +167,10 @@ export async function activate(ctx: PluginContext, core: CoreApi): Promise<Chann
   // agent answers in a group; without it a group gets no answer.
   const registerRoster = (): void => {
     core.registerRosterProvider?.(channelId, fleet.rosterProvider());
+    // Readiness (spec 2043 §5.3, kernel #2091): is the app `asChannelKey`
+    // names a member here, may it read every message, can it post?
+    // Without it the kernel treats no Slack conversation as ready.
+    core.registerReadinessProvider?.(channelId, createSlackReadinessProvider((key) => fleet.readinessFor(key)));
   };
 
   // Proactive sends (Conductor DMs, posts into a conversation) through exactly
@@ -233,6 +245,7 @@ export async function activate(ctx: PluginContext, core: CoreApi): Promise<Chann
           name: identity.name,
           send: app.send,
           roster: app.roster,
+          readiness: app.channel,
           signingSecret: credentials.signing_secret ?? '',
           channel: app.channel,
           state: appState,

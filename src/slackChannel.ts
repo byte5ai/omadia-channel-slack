@@ -2,7 +2,18 @@ import { LogLevel } from '@slack/logger';
 import { WebClient } from '@slack/web-api';
 import type { SlackDirectoryUser } from './slackPeopleDirectory.js';
 
-import type { ConversationMessageEvent, IncomingTurn } from '@omadia/channel-sdk';
+import type { ConversationMembershipEvent, ConversationMessageEvent, IncomingTurn } from '@omadia/channel-sdk';
+
+import {
+  conversationTypeOf,
+  mentionsUser,
+  SlackConversationEvents,
+  type SlackMembershipEvent,
+  type SlackMessageChangedEvent,
+  type SlackMessageDeletedEvent,
+  type SlackReactionEvent,
+} from './conversationEvents.js';
+import { HUMAN_MESSAGE_SUBTYPES, type SlackEventTarget } from './eventRouter.js';
 
 import {
   buildIncomingTurn,
@@ -51,6 +62,19 @@ export interface SlackChannelDeps {
   reportMessage?: (event: ConversationMessageEvent) => Promise<{ answeredCard: boolean }>;
   /** `core.conversationDelivery`: what the bot identity is handed of a conversation. Absent: emit. */
   deliveryOf?: (conversationId: string, channelKey: string) => 'all' | 'addressed' | 'none';
+  /** `core.emitConversationEvent`: members joining and leaving, the bot added or present. Absent: nothing emitted. */
+  emitMembership?: (event: ConversationMembershipEvent) => void;
+  /** A conversation's members changed: drop its cached roster. */
+  onMembershipChanged?: (conversationId: string) => void;
+}
+
+/** What `conversations.info` says about this app in a conversation (readiness). */
+export interface SlackConversationInfo {
+  isMember: boolean;
+  isIm: boolean;
+  isMpim: boolean;
+  isPrivate: boolean;
+  isArchived: boolean;
 }
 
 /**
@@ -102,9 +126,12 @@ const MEMBERS_PAGE_SIZE = 200;
  * for a bot outside its AI-assistant surface, so there is nothing to show
  * while the answer is being prepared.
  */
-export class SlackChannel implements SlackSink, SlackReactor {
+export class SlackChannel implements SlackSink, SlackReactor, SlackEventTarget {
   private readonly web: WebClient;
   private botUserId = '';
+  /** The bot token's granted scopes, from `auth.test` (`undefined`: Slack did not say). */
+  private scopes: readonly string[] | undefined;
+  private readonly events: SlackConversationEvents;
   private readonly profiles = new Map<string, { profile: SlackSenderProfile; expiresAt: number }>();
   private usersCache: { users: SlackDirectoryUser[]; truncated: boolean; fetchedAt: number } | undefined;
   /** `${channel}:${ts}` of messages already handled — Slack delivers a mention
@@ -117,6 +144,18 @@ export class SlackChannel implements SlackSink, SlackReactor {
       logger: makeSlackLogger(deps.log),
       logLevel: LogLevel.ERROR,
     });
+    this.events = new SlackConversationEvents({
+      channelId: deps.channelId,
+      selfUserId: () => this.botUserId,
+      channelKey: () => this.channelKey(),
+      ...(deps.emitMessage ? { emitMessage: deps.emitMessage } : {}),
+      ...(deps.emitMembership ? { emitMembership: deps.emitMembership } : {}),
+      ...(deps.deliveryOf ? { deliveryOf: deps.deliveryOf } : {}),
+      ...(deps.onMembershipChanged ? { onMembershipChanged: deps.onMembershipChanged } : {}),
+      admits: (conversationId, userId) => this.admits(conversationId, userId),
+      emailOf: async (userId) => (deps.deliveryOf ? (await this.senderProfile(userId)).email : undefined),
+      log: (message, context) => deps.log('warn', message, context),
+    });
   }
 
   /** Validate the bot token and learn our own identity — needed to ignore our
@@ -125,6 +164,8 @@ export class SlackChannel implements SlackSink, SlackReactor {
   async init(): Promise<void> {
     const auth = await this.web.auth.test();
     this.botUserId = typeof auth.user_id === 'string' ? auth.user_id : '';
+    const scopes = auth.response_metadata?.scopes;
+    this.scopes = Array.isArray(scopes) ? scopes.filter((scope): scope is string => typeof scope === 'string') : undefined;
     patchState(this.deps.state, {
       me: {
         botUserId: this.botUserId,
@@ -168,20 +209,19 @@ export class SlackChannel implements SlackSink, SlackReactor {
     teamId: string | undefined,
     source: TurnSource,
   ): Promise<void> {
-    const key = `${event.channel}:${event.ts}`;
-    if (this.handledKeys.has(key)) return;
-    this.handledKeys.add(key);
-    this.trimHandledKeys();
+    if (!this.firstTime(`${event.channel}:${event.ts}`)) return;
 
     try {
       // Never react to bot posts (incl. our own replies) — prevents reply loops.
       if (event.bot_id || event.subtype === 'bot_message') return;
       if (this.botUserId && event.user === this.botUserId) return;
 
-      const isMention = event.type === 'app_mention';
-      // Plain message events with a subtype are edits/joins/etc. — skip them.
-      // app_mention never carries a subtype.
-      if (!isMention && event.subtype) return;
+      // Slack delivers a mention as an `app_mention` AND a `message`, in either
+      // order: whichever comes first is the mention (the second is a duplicate).
+      const isMention = event.type === 'app_mention' || mentionsUser(event.text, this.botUserId);
+      // Other subtypes (joins, topic changes, ...) are no person's new message;
+      // edits and deletions are routed to `ingestEdit` / `ingestDeletion`.
+      if (event.subtype && !HUMAN_MESSAGE_SUBTYPES.has(event.subtype)) return;
 
       const channelType = event.channel_type ?? 'channel';
       const isDm = channelType === 'im';
@@ -194,6 +234,7 @@ export class SlackChannel implements SlackSink, SlackReactor {
       const dmOff = isDm && !this.deps.policy.allowDms;
       const allowlisted = this.isAllowlisted(event);
       if (!source.command && !dmOff && allowlisted) {
+        if (event.user) this.events.present(event.channel, event.user);
         const startsTurn = isMention || isDm || this.deps.policy.respondInChannels === 'all';
         if (await this.emitCreated(event, teamId, startsTurn)) {
           this.deps.log('info', 'Slack message consumed as the answer to an open question: no turn', {
@@ -284,6 +325,47 @@ export class SlackChannel implements SlackSink, SlackReactor {
     this.profiles.set(userId, { profile, expiresAt: Date.now() + ttlMs });
   }
 
+  /** A message edit (`message_changed`): the next revision for the kernel's record. */
+  async ingestEdit(event: SlackMessageChangedEvent, teamId: string | undefined): Promise<void> {
+    if (this.firstTime(`edit:${event.channel}:${event.message?.ts ?? ''}:${event.message?.edited?.ts ?? event.ts}`)) {
+      await this.events.edited(event, teamId);
+    }
+  }
+
+  /** A deleted message (`message_deleted`). */
+  async ingestDeletion(event: SlackMessageDeletedEvent, teamId: string | undefined): Promise<void> {
+    const deletedTs = event.deleted_ts ?? event.previous_message?.ts ?? event.ts;
+    if (this.firstTime(`delete:${event.channel}:${deletedTs}`)) await this.events.deleted(event, teamId);
+  }
+
+  /** `reaction_added` / `reaction_removed` (bot scope `reactions:read`). */
+  async ingestReaction(event: SlackReactionEvent, teamId: string | undefined): Promise<void> {
+    const key = `${event.type}:${event.item?.channel ?? ''}:${event.item?.ts ?? ''}:${event.user ?? ''}:${event.reaction ?? ''}:${event.event_ts ?? ''}`;
+    if (this.firstTime(key)) await this.events.reaction(event, teamId);
+  }
+
+  /** `member_joined_channel` / `member_left_channel`. */
+  async ingestMembership(event: SlackMembershipEvent): Promise<void> {
+    if (this.firstTime(`${event.type}:${event.channel ?? ''}:${event.user ?? ''}:${event.event_ts ?? ''}`)) {
+      this.events.membership(event);
+    }
+  }
+
+  /** The DM policy and allowlist for an event that is no new message. */
+  private admits(conversationId: string, userId: string | undefined): boolean {
+    if (conversationTypeOf(conversationId) === 'direct' && !this.deps.policy.allowDms) return false;
+    const { allowlist } = this.deps.policy;
+    return allowlist.size === 0 || allowlist.has(conversationId) || (userId !== undefined && allowlist.has(userId));
+  }
+
+  /** Slack retries deliveries: `true` the first time a key is seen. */
+  private firstTime(key: string): boolean {
+    if (this.handledKeys.has(key)) return false;
+    this.handledKeys.add(key);
+    this.trimHandledKeys();
+    return true;
+  }
+
   private isAllowlisted(event: SlackMessageEvent): boolean {
     const { allowlist } = this.deps.policy;
     return (
@@ -317,7 +399,7 @@ export class SlackChannel implements SlackSink, SlackReactor {
       const text = raw ? stripMention(raw, this.botUserId) : undefined;
       const isDm = (event.channel_type ?? 'channel') === 'im';
       const profile = deliveryOf ? await this.senderProfile(event.user) : {};
-      const mentionsBot = event.type === 'app_mention' || (raw?.includes(`<@${this.botUserId}`) ?? false);
+      const mentionsBot = event.type === 'app_mention' || mentionsUser(raw, this.botUserId);
       const occurredAt = new Date(Number.parseFloat(event.ts) * 1000);
       const message: ConversationMessageEvent = {
         channelId: this.deps.channelId,
@@ -509,6 +591,28 @@ export class SlackChannel implements SlackSink, SlackReactor {
   /** The bot's routing key `slack-bot:<member id>`, once `init()` has run. */
   channelKey(): string | undefined {
     return this.botUserId ? slackBotChannelKey(this.botUserId) : undefined;
+  }
+
+  /** The bot token's granted scopes as `auth.test` reported them; `undefined` before `init` or when Slack did not say. */
+  get grantedScopes(): readonly string[] | undefined {
+    return this.scopes;
+  }
+
+  /**
+   * This app in one conversation (`conversations.info`; bot scopes
+   * `channels:read` / `groups:read` / `im:read` / `mpim:read`). Throws the Web
+   * API error (with `data.error`) so the readiness check can say why.
+   */
+  async conversationInfo(conversationId: string): Promise<SlackConversationInfo> {
+    const info = await this.web.conversations.info({ channel: conversationId });
+    const c = info.channel;
+    return {
+      isMember: c?.is_member === true,
+      isIm: c?.is_im === true,
+      isMpim: c?.is_mpim === true,
+      isPrivate: c?.is_private === true || c?.is_group === true,
+      isArchived: c?.is_archived === true,
+    };
   }
 
   /** Is this bot a member of the conversation? For "who can be heard here". */
