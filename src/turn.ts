@@ -142,7 +142,11 @@ export function slackSenderPrincipal(turn: Pick<IncomingTurn, 'userRef'>): strin
  * for a turn without an origin.
  */
 export function slackTurnOrigin(turn: IncomingTurn, meta: SlackTurnMeta): TurnOrigin {
-  const userId = (turn.rawEvent as Partial<SlackMessageEvent> | undefined)?.user;
+  const raw = turn.rawEvent as Partial<SlackMessageEvent> | undefined;
+  const userId = raw?.user;
+  // A DM reply in a thread answers the thread root: the `ts` this plugin
+  // reports as `messageId` for its own sends (a reminder DM).
+  const replyTo = meta.channelType === 'im' && raw?.thread_ts && raw.thread_ts !== meta.eventTs ? raw.thread_ts : undefined;
   const principal = userId ? parsePrincipal(channelUserPrincipal(turn.userRef)) : undefined;
   return {
     channelType: SLACK_CHANNEL_TYPE,
@@ -155,6 +159,9 @@ export function slackTurnOrigin(turn: IncomingTurn, meta: SlackTurnMeta): TurnOr
     channelConversationId: turn.conversationId,
     messageId: meta.eventTs,
     ...(userId ? { speaker: { kind: turn.userRef.kind, id: userId } } : {}),
+    // `TurnOrigin.replyToMessageId` since channel-sdk 0.3.11 (kernel #2157);
+    // spread, so it type-checks against 0.3.9 too.
+    ...(replyTo ? { replyToMessageId: replyTo } : {}),
   };
 }
 
