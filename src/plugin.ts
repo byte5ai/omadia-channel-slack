@@ -24,7 +24,7 @@ import { SlackOutbox } from './outbox.js';
 import { SLACK_CHANNEL_TYPE } from './renderer.js';
 import { SlackChannel, slackBotChannelKey } from './slackChannel.js';
 import { createSlackPeopleDirectoryProvider } from './slackPeopleDirectory.js';
-import { createSlackReadinessProvider } from './slackReadiness.js';
+import { createSlackMeetingSource, createSlackReadinessProvider } from './slackReadiness.js';
 import { createSlackRosterProvider, type SlackRosterProvider } from './slackRoster.js';
 import { createSlackSendProviders } from './slackSendProviders.js';
 import { SocketModeTransport } from './socketModeTransport.js';
@@ -171,6 +171,10 @@ export async function activate(ctx: PluginContext, core: CoreApi): Promise<Chann
     // names a member here, may it read every message, can it post?
     // Without it the kernel treats no Slack conversation as ready.
     core.registerReadinessProvider?.(channelId, createSlackReadinessProvider((key) => fleet.readinessFor(key)));
+    // Capability snapshot (spec 2043 §6.1): what a conversation delivers to
+    // the kernel (text, edits, reactions with reactions:read). Without it the
+    // kernel reports the text-only baseline.
+    core.registerMeetingSourceProvider?.(channelId, createSlackMeetingSource((key) => fleet.readinessFor(key)));
   };
 
   // Proactive sends (Conductor DMs, posts into a conversation) through exactly

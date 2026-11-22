@@ -4,7 +4,12 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
 import type { SlackConversationInfo } from '../src/slackChannel.js';
-import { createSlackReadinessProvider, historyScopeFor, type SlackReadinessSource } from '../src/slackReadiness.js';
+import {
+  createSlackMeetingSource,
+  createSlackReadinessProvider,
+  historyScopeFor,
+  type SlackReadinessSource,
+} from '../src/slackReadiness.js';
 
 const CHANNEL: SlackConversationInfo = { isMember: true, isIm: false, isMpim: false, isPrivate: false, isArchived: false };
 const ALL_SCOPES = ['chat:write', 'channels:history', 'groups:history', 'im:history', 'mpim:history', 'channels:read'];
@@ -16,13 +21,16 @@ function provider(source: Partial<SlackReadinessSource> & { info?: () => Promise
   const app: SlackReadinessSource = {
     grantedScopes: 'grantedScopes' in source ? source.grantedScopes : ALL_SCOPES,
     conversationInfo: source.info ?? (async () => CHANNEL),
+    ...(source.policy ? { policy: source.policy } : {}),
+    ...(source.refreshScopes ? { refreshScopes: source.refreshScopes } : {}),
   };
   return createSlackReadinessProvider((key) => (key === KEY ? app : undefined));
 }
 
 test('a member app with the history and post scopes is ready, checked', async () => {
   const report = await provider({}).check('C1', { asChannelKey: 'SLACK-BOT:UMIRA01' });
-  assert.deepEqual(report, { ready: true, installed: true, canReadAllMessages: true, canPost: true, missing: [] });
+  // The message.* event subscriptions cannot be proven: never `verified`.
+  assert.deepEqual(report, { ready: true, installed: true, canReadAllMessages: true, canPost: true, missing: [], verified: false });
 });
 
 test('an unknown key is no identity, never another app', async () => {
@@ -80,4 +88,43 @@ test('a DM and a group DM count as installed; the history scope follows the conv
   assert.equal(historyScopeFor('C2', { ...CHANNEL, isPrivate: true }), 'groups:history');
   assert.equal(historyScopeFor('G2', { ...CHANNEL, isMpim: true }), 'mpim:history');
   assert.equal(historyScopeFor('D1', CHANNEL), 'im:history');
+});
+
+test('the app\'s own policy is applied: DMs off is unsupported, a channel outside the allowlist cannot read every message', async () => {
+  const dmOff = await provider({ policy: { allowDms: false, allowlist: new Set() }, info: async () => ({ ...CHANNEL, isIm: true }) }).check('D1', { asChannelKey: KEY });
+  assert.deepEqual([dmOff.ready, dmOff.canReadAllMessages, dmOff.missing[0]?.code], [false, false, 'unsupported_conversation']);
+  assert.match(dmOff.missing[0]?.message ?? '', /direct messages are switched off/);
+  const listed = provider({ policy: { allowDms: true, allowlist: new Set(['COK', 'UANNA']) } });
+  const outside = await listed.check('C1', { asChannelKey: KEY });
+  assert.deepEqual([outside.ready, outside.canReadAllMessages, outside.missing[0]?.code], [false, false, 'consent_missing']);
+  assert.match(outside.missing[0]?.message ?? '', /allowlist/);
+  const inside = await listed.check('COK', { asChannelKey: KEY });
+  assert.equal(inside.ready, true);
+});
+
+test('readiness reads the refreshed scopes, not the ones of init', async () => {
+  const report = await provider({ grantedScopes: ALL_SCOPES, refreshScopes: async () => ['chat:write'] }).check('C1', { asChannelKey: KEY });
+  assert.equal(report.missing[0]?.code, 'consent_missing');
+});
+
+test('the capability snapshot declares text and edits, reactions only with reactions:read', async () => {
+  const at = () => new Date(5_000);
+  const snapshot = (scopes: readonly string[] | undefined, conversationId = 'C1') =>
+    createSlackMeetingSource(
+      (key) => (key === KEY ? { grantedScopes: scopes, conversationInfo: async () => CHANNEL } : undefined),
+      at,
+    ).snapshot(conversationId, { asChannelKey: KEY });
+  assert.deepEqual(await snapshot(ALL_SCOPES), {
+    channelType: 'slack',
+    conversationId: 'C1',
+    modality: 'chat',
+    inputs: ['text', 'message_edits'],
+    outputs: ['text', 'mentions', 'private_messages'],
+    capturedAt: new Date(5_000).toISOString(),
+  });
+  assert.deepEqual((await snapshot([...ALL_SCOPES, 'reactions:read']))?.inputs, ['text', 'message_edits', 'reactions']);
+  assert.deepEqual((await snapshot(undefined))?.inputs, ['text', 'message_edits'], 'unknown scopes: reactions are not claimed');
+  assert.deepEqual((await snapshot(ALL_SCOPES, 'D1'))?.outputs, ['text']);
+  const unknown = await createSlackMeetingSource(() => undefined).snapshot('C1', { asChannelKey: 'slack-bot:uother' });
+  assert.equal(unknown, undefined);
 });
