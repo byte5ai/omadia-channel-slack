@@ -14,7 +14,19 @@ import { createChannelState } from '../src/state.js';
 
 type Delivery = 'all' | 'addressed' | 'none';
 
-function rig(opts: { policy?: Partial<AccessPolicy>; delivery?: (conversationId: string) => Delivery; botId?: string } = {}) {
+type UsersInfo = (args: { user: string }) => Promise<unknown>;
+
+const humanInfo: UsersInfo = async ({ user }) => ({ user: { profile: { email: `${user.toLowerCase()}@example.com` } } });
+
+function rig(
+  opts: {
+    policy?: Partial<AccessPolicy>;
+    delivery?: (conversationId: string) => Delivery;
+    botId?: string;
+    usersInfo?: UsersInfo;
+    now?: () => number;
+  } = {},
+) {
   const messages: ConversationMessageEvent[] = [];
   const membership: ConversationMembershipEvent[] = [];
   const turns: IncomingTurn[] = [];
@@ -30,6 +42,7 @@ function rig(opts: { policy?: Partial<AccessPolicy>; delivery?: (conversationId:
     emitMessage: (e) => void messages.push(e),
     emitMembership: (e) => void membership.push(e),
     onMembershipChanged: (id) => void forgotten.push(id),
+    ...(opts.now ? { now: opts.now } : {}),
     ...(opts.delivery
       ? {
           deliveryOf: (conversationId: string, key: string) => {
@@ -43,7 +56,7 @@ function rig(opts: { policy?: Partial<AccessPolicy>; delivery?: (conversationId:
   const botId = opts.botId ?? 'UBOT';
   (channel as unknown as { botUserId: string }).botUserId = botId;
   const web = (channel as unknown as { web: { users: { info: (a: { user: string }) => Promise<unknown> } } }).web;
-  web.users.info = async ({ user }) => ({ user: { profile: { email: `${user.toLowerCase()}@example.com` } } });
+  web.users.info = opts.usersInfo ?? humanInfo;
   const deliver = (event: unknown) => routeSlackEvent(channel, event, 'T1');
   return { channel, messages, membership, turns, forgotten, asked, deliver };
 }
@@ -198,4 +211,98 @@ test('membership outside the allowlist is not emitted, but the cached roster is 
   await r.deliver({ type: 'member_joined_channel', user: 'UEVA', channel: 'CFAC', event_ts: '700.0' });
   assert.equal(r.membership.length, 0);
   assert.deepEqual(r.forgotten, ['CFAC']);
+});
+
+/** users.info that names UPOLL an app and gives people a display name. */
+const appAwareInfo: UsersInfo = async ({ user }) =>
+  user === 'UPOLL'
+    ? { user: { is_bot: true, name: 'pollbot' } }
+    : { user: { name: user.toLowerCase(), profile: { display_name: `Name ${user}`, email: `${user.toLowerCase()}@example.com` } } };
+
+test('another app joining, leaving or reacting is no participant; people carry their display name', async () => {
+  const r = rig({ delivery: () => 'all', usersInfo: appAwareInfo });
+  await r.deliver({ type: 'member_joined_channel', user: 'UPOLL', channel: 'CFAC', event_ts: '800.0' });
+  await r.deliver({ type: 'member_left_channel', user: 'UPOLL', channel: 'CFAC', event_ts: '800.5' });
+  await r.deliver({ type: 'member_joined_channel', user: 'UEVA', channel: 'CFAC', event_ts: '801.0' });
+  await r.deliver({ type: 'member_joined_channel', user: 'USLACKBOT', channel: 'CFAC', event_ts: '801.5' });
+  assert.deepEqual(
+    r.membership.map((e) => [e.kind, e.members]),
+    [['members_added', [{ kind: 'slack-user', id: 'UEVA', displayName: 'Name UEVA', email: 'ueva@example.com' }]]],
+  );
+  assert.deepEqual(r.forgotten, ['CFAC', 'CFAC', 'CFAC', 'CFAC'], 'the roster is dropped for apps too');
+  const reaction = (user: string) => ({ type: 'reaction_added', user, reaction: '+1', item: { type: 'message', channel: 'CFAC', ts: '300.1' }, event_ts: `${user}.1` });
+  await r.deliver(reaction('UPOLL'));
+  await r.deliver(reaction('UANNA'));
+  assert.deepEqual(r.messages.map((m) => [m.kind, m.author.id]), [['reaction', 'UANNA']]);
+});
+
+test('bot_present is sent again after 12 hours, not before', async () => {
+  let now = 1_000_000;
+  const r = rig({ now: () => now });
+  await r.deliver(msg('UANNA', 'hallo', '900.1'));
+  now += 11 * 60 * 60 * 1000;
+  await r.deliver(msg('UANNA', 'hallo', '900.2'));
+  now += 60 * 60 * 1000;
+  await r.deliver(msg('UBERT', 'hallo', '900.3'));
+  assert.deepEqual(
+    r.membership.map((e) => [e.kind, e.kind === 'bot_present' ? e.addedBy?.id : undefined, e.occurredAt]),
+    [
+      ['bot_present', 'UANNA', new Date(1_000_000).toISOString()],
+      ['bot_present', 'UBERT', new Date(1_000_000 + 12 * 60 * 60 * 1000).toISOString()],
+    ],
+  );
+});
+
+test('the same edit after the dedup window is not emitted twice', async () => {
+  const r = rig({ delivery: () => 'all' });
+  const edit = { type: 'message', subtype: 'message_changed', channel: 'CFAC', ts: '150.0', message: { user: 'UBERT', text: 'A > B', ts: '100.2', edited: { ts: '150.0' } } };
+  await r.deliver(edit);
+  // Push the first delivery out of the handled-key window (1000 keys).
+  for (let i = 0; i < 1_100; i += 1) {
+    await r.deliver({ type: 'reaction_added', user: 'UANNA', reaction: 'x', item: { type: 'file' }, event_ts: `${String(i)}.0` });
+  }
+  await r.deliver(edit);
+  await r.deliver({ ...edit, ts: '151.0', message: { ...edit.message, text: 'B > A', edited: { ts: '151.0' } } });
+  assert.deepEqual(r.messages.map((m) => [m.kind, m.text, m.revision]), [['edited', 'A > B', 1], ['edited', 'B > A', 2]]);
+});
+
+test('deleting a message with thread replies (a tombstone) is a deletion, once', async () => {
+  const r = rig({ delivery: () => 'all' });
+  const tombstone = {
+    type: 'message',
+    subtype: 'message_changed',
+    channel: 'CFAC',
+    ts: '190.0',
+    hidden: true,
+    message: { type: 'message', subtype: 'tombstone', user: 'USLACKBOT', text: 'This message was deleted.', ts: '100.2', thread_ts: '100.2' },
+    previous_message: { user: 'UBERT', ts: '100.2', text: 'A > B' },
+  };
+  await r.deliver(tombstone);
+  await r.deliver({ type: 'message', subtype: 'message_deleted', channel: 'CFAC', ts: '191.0', deleted_ts: '100.2', previous_message: { user: 'UBERT', ts: '100.2' } });
+  assert.deepEqual(r.messages.map((m) => [m.kind, m.messageId, m.author.id, m.occurredAt]), [['deleted', '100.2', 'UBERT', new Date(190_000).toISOString()]]);
+});
+
+test('an edit handed over while its created still waits is emitted after it', async () => {
+  let release: () => void = () => undefined;
+  const gate = new Promise<void>((resolve) => (release = resolve));
+  let first = true;
+  const r = rig({
+    delivery: () => 'all',
+    usersInfo: async (args) => {
+      if (first) {
+        first = false;
+        await gate;
+      }
+      return humanInfo(args);
+    },
+  });
+  // Fire-and-forget, like the Events API transport.
+  const created = r.deliver(msg('UBERT', 'A > B', '100.2'));
+  const edited = r.deliver({ type: 'message', subtype: 'message_changed', channel: 'CFAC', ts: '150.0', message: { user: 'UBERT', text: 'B > A', ts: '100.2', edited: { ts: '150.0' } } });
+  const other = r.deliver({ ...msg('UANNA', 'hi', '1.1'), channel: 'COTHER' });
+  await other;
+  assert.deepEqual(r.messages.map((m) => m.conversationId), ['COTHER'], 'another conversation is not held up');
+  release();
+  await Promise.all([created, edited]);
+  assert.deepEqual(r.messages.filter((m) => m.conversationId === 'CFAC').map((m) => m.kind), ['created', 'edited']);
 });

@@ -4,7 +4,14 @@ import { afterEach, mock, test } from 'node:test';
 import type { ConversationMessageEvent, IncomingTurn } from '@omadia/channel-sdk';
 
 import type { SlackSlashCommandPayload } from '../src/inbound.js';
-import { SlackChannel, validResponseUrl, type AccessPolicy, type SlackChannelDeps } from '../src/slackChannel.js';
+import {
+  PROBE_CLIENT_OPTIONS,
+  SCOPES_TTL_MS,
+  SlackChannel,
+  validResponseUrl,
+  type AccessPolicy,
+  type SlackChannelDeps,
+} from '../src/slackChannel.js';
 import { createChannelState } from '../src/state.js';
 
 const URL_OK = 'https://hooks.slack.com/commands/T1/1/x';
@@ -326,4 +333,43 @@ test('conversationMembers: a failure on page two throws (the roster turns it int
     throw Object.assign(new Error('An API error occurred: ratelimited'), { data: { ok: false, error: 'ratelimited' } });
   };
   await assert.rejects(channel.conversationMembers('C1', 2_000), /ratelimited/);
+});
+
+test('readiness probes use a client without retries and a short timeout', async () => {
+  const { channel } = make();
+  const probe = (channel as unknown as { probe: { retryConfig: unknown; axios: { defaults: { timeout?: number } } } }).probe;
+  assert.deepEqual(probe.retryConfig, { retries: 0 });
+  assert.equal(probe.axios.defaults.timeout, PROBE_CLIENT_OPTIONS.timeout);
+  assert.ok(PROBE_CLIENT_OPTIONS.timeout <= 10_000);
+});
+
+test('granted scopes are re-read through auth.test once stale; a failed refresh keeps the last ones', async () => {
+  let now = 1_000;
+  const channel = new SlackChannel({
+    channelId: 'slack-1',
+    botToken: 'xoxb-test',
+    log: () => undefined,
+    state: createChannelState(),
+    policy: { respondInChannels: 'mention', allowDms: true, allowlist: new Set() },
+    onMessage: async () => undefined,
+    now: () => now,
+  });
+  const answers: Array<() => Promise<unknown>> = [
+    async () => ({ user_id: 'UBOT', response_metadata: { scopes: ['chat:write'] } }),
+    async () => ({ user_id: 'UBOT', response_metadata: { scopes: ['chat:write', 'channels:history'] } }),
+    async () => Promise.reject(new Error('socket hang up')),
+  ];
+  let calls = 0;
+  const stub = { test: async () => answers[calls++]!() };
+  (channel as unknown as { web: { auth: unknown } }).web.auth = stub;
+  (channel as unknown as { probe: { auth: unknown } }).probe.auth = stub;
+  await channel.init();
+  assert.deepEqual(await channel.refreshScopes(), ['chat:write'], 'fresh after init: no call');
+  assert.equal(calls, 1);
+  now += SCOPES_TTL_MS;
+  assert.deepEqual(await channel.refreshScopes(), ['chat:write', 'channels:history']);
+  assert.equal(calls, 2);
+  now += SCOPES_TTL_MS;
+  assert.deepEqual(await channel.refreshScopes(), ['chat:write', 'channels:history']);
+  assert.equal(calls, 3);
 });

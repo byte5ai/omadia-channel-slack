@@ -5,6 +5,7 @@ import type {
 } from '@omadia/channel-sdk';
 
 import { stripMention } from './inbound.js';
+import { SLACKBOT_USER_ID, type SlackMemberProfile } from './slackProfiles.js';
 
 /**
  * The Slack events besides a new message that a moderated conversation needs
@@ -29,6 +30,8 @@ export interface SlackMessageChangedEvent {
     /** Only a real edit carries it (an unfurl does not). */
     edited?: { user?: string; ts?: string };
   };
+  /** The message before the change (a tombstone names the real author here). */
+  previous_message?: { user?: string; ts?: string; bot_id?: string };
 }
 
 export interface SlackMessageDeletedEvent {
@@ -74,15 +77,23 @@ export interface ConversationEventsDeps {
   onMembershipChanged?: (conversationId: string) => void;
   /** DM policy and allowlist, the same as for new messages. */
   admits: (conversationId: string, userId: string | undefined) => boolean;
-  /** The sender's verified e-mail, when the profile gives one. */
-  emailOf: (userId: string) => Promise<string | undefined>;
+  /** The member's profile (`users.info`, cached): e-mail, display name, whether it is an app. Never throws. */
+  memberOf: (userId: string) => Promise<SlackMemberProfile>;
   log: (message: string, context?: Record<string, unknown>) => void;
+  /** Injected for tests. */
+  now?: () => number;
 }
 
 /** Edit counters kept at most; the kernel assigns the authoritative revision. */
 const REVISIONS_MAX = 1_000;
 /** Conversations whose `bot_present` was already emitted, kept at most. */
 const PRESENT_MAX = 2_000;
+/**
+ * `bot_present` is re-sent after this long: the kernel forgets the
+ * eligibility after 24 h, so a long-running process must not rely on its
+ * first emit (the same interval as Teams).
+ */
+export const BOT_PRESENT_REEMIT_MS = 12 * 60 * 60 * 1000;
 
 const SLACK_USER = 'slack-user' as const;
 
@@ -95,6 +106,25 @@ export function conversationTypeOf(channelId: string): 'direct' | 'group' {
 export function slackTsToIso(ts: string | undefined): string {
   const date = new Date(Number.parseFloat(ts ?? '') * 1000);
   return Number.isFinite(date.getTime()) ? date.toISOString() : new Date().toISOString();
+}
+
+/**
+ * A deleted message that had thread replies: Slack keeps a placeholder and
+ * sends it as `message_changed` with the subtype `tombstone` instead of a
+ * `message_deleted`.
+ */
+export function isTombstone(event: SlackMessageChangedEvent): boolean {
+  return event.message?.subtype === 'tombstone';
+}
+
+/** Insert into an insertion-ordered map, dropping the oldest entry past `max`. */
+function rememberBounded<V>(map: Map<string, V>, key: string, value: V, max: number): void {
+  map.delete(key);
+  map.set(key, value);
+  if (map.size > max) {
+    const oldest = map.keys().next().value;
+    if (oldest !== undefined) map.delete(oldest);
+  }
 }
 
 /** Does `text` mention the bot `<@U…>` (also `<@U…|name>`)? */
@@ -110,17 +140,33 @@ export function mentionsUser(text: string | undefined, userId: string): boolean 
  */
 export class SlackConversationEvents {
   private readonly revisions = new Map<string, number>();
-  private readonly presentIn = new Set<string>();
+  /** `${channel}:${ts}` → `edited.ts` and text of the last revision emitted. */
+  private readonly lastEdits = new Map<string, string>();
+  /** Conversation → when its `bot_present` was last emitted (epoch ms). */
+  private readonly presentAt = new Map<string, number>();
+  private readonly now: () => number;
 
-  constructor(private readonly deps: ConversationEventsDeps) {}
+  constructor(private readonly deps: ConversationEventsDeps) {
+    this.now = deps.now ?? Date.now;
+  }
 
-  /** `message_changed` with an `edited` stamp: the next revision of a human message. */
+  /**
+   * `message_changed` with an `edited` stamp: the next revision of a human
+   * message. A tombstone (a deleted message with thread replies) is a
+   * deletion. The same edit seen again after the dedup window (same
+   * `edited.ts`, same text) is not emitted twice.
+   */
   async edited(event: SlackMessageChangedEvent, teamId: string | undefined): Promise<void> {
+    if (isTombstone(event)) return this.tombstoned(event, teamId);
     const message = event.message;
     const author = message?.user;
     const messageTs = message?.ts;
     if (!message?.edited || !author || !messageTs || message.bot_id || this.isSelf(author)) return;
     const text = message.text ?? '';
+    const key = `${event.channel}:${messageTs}`;
+    const signature = `${message.edited.ts ?? event.ts}\n${text}`;
+    if (this.lastEdits.get(key) === signature) return;
+    rememberBounded(this.lastEdits, key, signature, REVISIONS_MAX);
     await this.emit(event.channel, author, {
       messageId: messageTs,
       revision: this.nextRevision(event.channel, messageTs),
@@ -146,7 +192,22 @@ export class SlackConversationEvents {
     }, teamId);
   }
 
-  /** `reaction_added` / `reaction_removed` on a message (bot scope `reactions:read`). */
+  /** A tombstone: the message is gone, its thread stays. The author is the one of `previous_message`. */
+  private async tombstoned(event: SlackMessageChangedEvent, teamId: string | undefined): Promise<void> {
+    const previous = event.previous_message;
+    const placeholderAuthor = event.message?.user;
+    const author = previous?.user ?? (placeholderAuthor !== SLACKBOT_USER_ID ? placeholderAuthor : undefined);
+    const messageTs = event.message?.ts ?? previous?.ts;
+    if (!author || !messageTs || previous?.bot_id || this.isSelf(author)) return;
+    await this.emit(event.channel, author, {
+      messageId: messageTs,
+      revision: this.nextRevision(event.channel, messageTs),
+      kind: 'deleted',
+      occurredAt: slackTsToIso(event.ts),
+    }, teamId);
+  }
+
+  /** `reaction_added` / `reaction_removed` on a message (bot scope `reactions:read`); another app's reaction is no person's. */
   async reaction(event: SlackReactionEvent, teamId: string | undefined): Promise<void> {
     const { user, reaction, item } = event;
     if (!user || !reaction || item?.type !== 'message' || !item.channel || !item.ts || this.isSelf(user)) return;
@@ -164,14 +225,43 @@ export class SlackConversationEvents {
    * `channels:read`, `groups:read`): `members_added` / `members_removed`, or
    * `bot_added` when this app itself joined (with the inviter, when Slack
    * names one). The cached roster of the conversation is dropped either way.
+   * Another app or bot joining or leaving is not emitted: it is never a
+   * participant (a voter). Members carry their display name when Slack has one.
    */
-  membership(event: SlackMembershipEvent): void {
+  async membership(event: SlackMembershipEvent): Promise<void> {
     const { user, channel } = event;
     if (!user || !channel) return;
     this.deps.onMembershipChanged?.(channel);
     if (!this.deps.emitMembership || !this.deps.admits(channel, user)) return;
-    const member: ChannelUserRef = { kind: SLACK_USER, id: user };
-    const base = {
+    const joined = event.type === 'member_joined_channel';
+    if (joined && this.isSelf(user)) {
+      this.safely(() =>
+        this.deps.emitMembership?.({
+          ...this.membershipBase(event, channel, { kind: SLACK_USER, id: user }),
+          kind: 'bot_added',
+          ...(event.inviter ? { addedBy: { kind: SLACK_USER, id: event.inviter } } : {}),
+        }),
+      );
+      return;
+    }
+    if (this.isSelf(user)) return;
+    const profile = await this.deps.memberOf(user);
+    if (profile.isBot) return;
+    const member: ChannelUserRef = {
+      kind: SLACK_USER,
+      id: user,
+      ...(profile.displayName ? { displayName: profile.displayName } : {}),
+      ...(profile.email ? { email: profile.email } : {}),
+    };
+    const membershipEvent: ConversationMembershipEvent = {
+      ...this.membershipBase(event, channel, member),
+      kind: joined ? 'members_added' : 'members_removed',
+    };
+    this.safely(() => this.deps.emitMembership?.(membershipEvent));
+  }
+
+  private membershipBase(event: SlackMembershipEvent, channel: string, member: ChannelUserRef) {
+    return {
       channelId: this.deps.channelId,
       channelType: 'slack',
       conversationId: channel,
@@ -179,25 +269,23 @@ export class SlackConversationEvents {
       members: [member],
       occurredAt: slackTsToIso(event.event_ts),
     } as const;
-    const joined = event.type === 'member_joined_channel';
-    const membershipEvent: ConversationMembershipEvent =
-      joined && this.isSelf(user)
-        ? { ...base, kind: 'bot_added', ...(event.inviter ? { addedBy: { kind: SLACK_USER, id: event.inviter } } : {}) }
-        : { ...base, kind: joined ? 'members_added' : 'members_removed' };
-    this.safely(() => this.deps.emitMembership?.(membershipEvent));
   }
 
   /**
    * `bot_present` (eligibility only): a human group message proves this app is
-   * a member, also when it was added long before omadia ran. Once per
-   * conversation and process; the sender is `addedBy`, best-effort.
+   * a member, also when it was added long before omadia ran. At most once per
+   * conversation every {@link BOT_PRESENT_REEMIT_MS} (the kernel forgets it
+   * after 24 h); the sender is `addedBy`, best-effort.
    */
   present(conversationId: string, senderId: string): void {
     if (!this.deps.emitMembership || conversationTypeOf(conversationId) !== 'group') return;
     const self = this.deps.selfUserId();
-    if (!self || this.presentIn.has(conversationId)) return;
-    if (this.presentIn.size >= PRESENT_MAX) this.presentIn.clear();
-    this.presentIn.add(conversationId);
+    if (!self) return;
+    const now = this.now();
+    const last = this.presentAt.get(conversationId);
+    if (last !== undefined && now - last < BOT_PRESENT_REEMIT_MS) return;
+    if (this.presentAt.size >= PRESENT_MAX) this.presentAt.clear();
+    this.presentAt.set(conversationId, now);
     const event: ConversationMembershipEvent = {
       kind: 'bot_present',
       channelId: this.deps.channelId,
@@ -206,7 +294,7 @@ export class SlackConversationEvents {
       conversationType: 'group',
       members: [{ kind: SLACK_USER, id: self }],
       addedBy: { kind: SLACK_USER, id: senderId },
-      occurredAt: new Date().toISOString(),
+      occurredAt: new Date(now).toISOString(),
     };
     this.safely(() => this.deps.emitMembership?.(event));
   }
@@ -223,7 +311,10 @@ export class SlackConversationEvents {
     if (!emitMessage || !channelKey || !this.deps.admits(conversationId, authorId)) return;
     if (deliveryOf?.(conversationId, channelKey) === 'none') return;
     try {
-      const email = await this.deps.emailOf(authorId);
+      const profile = await this.deps.memberOf(authorId);
+      // Another app (a poll bot, a workflow) is no person: its reaction or edit never counts.
+      if (profile.isBot) return;
+      const email = profile.email;
       emitMessage({
         channelId: this.deps.channelId,
         channelType: 'slack',
@@ -256,12 +347,7 @@ export class SlackConversationEvents {
   private nextRevision(channel: string, ts: string): number {
     const key = `${channel}:${ts}`;
     const next = (this.revisions.get(key) ?? 0) + 1;
-    this.revisions.delete(key);
-    this.revisions.set(key, next);
-    if (this.revisions.size > REVISIONS_MAX) {
-      const oldest = this.revisions.keys().next().value;
-      if (oldest !== undefined) this.revisions.delete(oldest);
-    }
+    rememberBounded(this.revisions, key, next, REVISIONS_MAX);
     return next;
   }
 }
