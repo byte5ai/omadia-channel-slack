@@ -99,6 +99,8 @@ function failureDetail(channelId: string, code: string | undefined): string {
 export function createSlackRosterProvider(deps: SlackRosterDeps): SlackRosterProvider {
   const now = deps.now ?? Date.now;
   const cache = new Map<string, { roster: ConversationRoster; at: number }>();
+  /** Bumped by every forget(): a read that started before it is not cached (it may predate the change). */
+  let generation = 0;
 
   const remember = (channelId: string, roster: ConversationRoster): void => {
     cache.delete(channelId);
@@ -112,6 +114,7 @@ export function createSlackRosterProvider(deps: SlackRosterDeps): SlackRosterPro
   return {
     channelType: SLACK_CHANNEL_TYPE,
     forget(conversationId: string): void {
+      generation += 1;
       cache.delete(conversationId.trim());
     },
     async getRoster(conversationId: string, opts?: ConversationRosterRequest) {
@@ -121,6 +124,7 @@ export function createSlackRosterProvider(deps: SlackRosterDeps): SlackRosterPro
       if (!opts?.fresh && hit && now() - hit.at < ROSTER_CACHE_TTL_MS) return hit.roster;
 
       const readAt = new Date(now()).toISOString();
+      const startedAt = generation;
       try {
         const { memberIds, truncated } = await deps.channel.conversationMembers(channelId, ROSTER_MAX_MEMBERS);
         const selfId = deps.channel.selfUserId;
@@ -137,7 +141,7 @@ export function createSlackRosterProvider(deps: SlackRosterDeps): SlackRosterPro
           readAt,
           ...(truncated ? { statusDetail: `only the first ${String(ROSTER_MAX_MEMBERS)} members were read` } : {}),
         };
-        remember(channelId, roster);
+        if (startedAt === generation) remember(channelId, roster);
         return roster;
       } catch (err) {
         const detail = failureDetail(channelId, apiErrorCode(err));

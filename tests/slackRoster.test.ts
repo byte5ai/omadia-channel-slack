@@ -126,3 +126,23 @@ test('a read that fails on a later page is unknown, never complete, and the earl
   assert.equal(fresh ? rosterStatusOf(fresh) : undefined, 'unknown');
   assert.deepEqual(fresh?.participants, []);
 });
+
+test('a read that started before a forget() is returned but not cached', async () => {
+  let resolveRead: (v: { memberIds: string[]; truncated: boolean }) => void = () => undefined;
+  let reads = 0;
+  const provider = createSlackRosterProvider({
+    channel: source(() => {
+      reads += 1;
+      if (reads === 1) return new Promise((resolve) => (resolveRead = resolve));
+      return Promise.resolve({ memberIds: ['U1', 'U2', 'UBOT'], truncated: false });
+    }),
+    log: () => undefined,
+  });
+  const stale = provider.getRoster('C1');
+  provider.forget('C1'); // U2 joined while the first read was in flight
+  resolveRead({ memberIds: ['U1', 'UBOT'], truncated: false });
+  assert.deepEqual((await stale)?.participants.map((p) => p.userRef.id), ['U1', 'UBOT']);
+  const next = await provider.getRoster('C1');
+  assert.equal(reads, 2, 'the pre-forget read was not cached');
+  assert.deepEqual(next?.participants.map((p) => p.userRef.id), ['U1', 'U2', 'UBOT']);
+});
