@@ -3,7 +3,7 @@ import { test } from 'node:test';
 
 import { rosterStatusOf } from '@omadia/channel-sdk';
 
-import { ROSTER_CACHE_TTL_MS, ROSTER_MAX_MEMBERS, createSlackRosterProvider } from '../src/slackRoster.js';
+import { ROSTER_CACHE_TTL_MS, ROSTER_MAX_MEMBERS, ROSTER_PROFILE_LOOKUPS_MAX, createSlackRosterProvider } from '../src/slackRoster.js';
 
 function source(read: (channel: string) => Promise<{ memberIds: string[]; truncated: boolean }>) {
   const calls: string[] = [];
@@ -145,4 +145,36 @@ test('a read that started before a forget() is returned but not cached', async (
   const next = await provider.getRoster('C1');
   assert.equal(reads, 2, 'the pre-forget read was not cached');
   assert.deepEqual(next?.participants.map((p) => p.userRef.id), ['U1', 'U2', 'UBOT']);
+});
+
+test('other apps, bots and Slackbot are marked isBot from users.info, people are not', async () => {
+  const looked: string[] = [];
+  const src = {
+    ...source(async () => ({ memberIds: ['U1', 'UJIRA', 'UGIPHY', 'USLACKBOT', 'UBOT', 'U2'], truncated: false })),
+    senderProfile: async (id: string) => {
+      looked.push(id);
+      if (id === 'U2') throw new Error('rate limited');
+      return id === 'UJIRA' || id === 'UGIPHY' ? { isBot: true } : {};
+    },
+  };
+  const roster = await createSlackRosterProvider({ channel: src, log: () => undefined }).getRoster('C1');
+  const bots = roster?.participants.filter((p) => p.isBot === true).map((p) => p.userRef.id).sort();
+  assert.deepEqual(bots, ['UBOT', 'UGIPHY', 'UJIRA', 'USLACKBOT']);
+  assert.deepEqual(looked.sort(), ['U1', 'U2', 'UGIPHY', 'UJIRA'], 'own app and Slackbot need no lookup');
+  assert.equal(roster?.participants.find((p) => p.userRef.id === 'U2')?.isBot, undefined, 'a failed lookup stays a person');
+});
+
+test('profile lookups per read are capped', async () => {
+  const ids = Array.from({ length: ROSTER_PROFILE_LOOKUPS_MAX + 5 }, (_, i) => `U${String(i)}`);
+  let lookups = 0;
+  const src = {
+    ...source(async () => ({ memberIds: ids, truncated: false })),
+    senderProfile: async () => {
+      lookups += 1;
+      return { isBot: true };
+    },
+  };
+  const roster = await createSlackRosterProvider({ channel: src, log: () => undefined }).getRoster('C1');
+  assert.equal(lookups, ROSTER_PROFILE_LOOKUPS_MAX);
+  assert.equal(roster?.participants.filter((p) => p.isBot === true).length, ROSTER_PROFILE_LOOKUPS_MAX);
 });

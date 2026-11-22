@@ -4,6 +4,13 @@
 
 Native facilitators in Slack (issue #6, spec 2043 §5.3, §5.5, §6.4).
 
+- **Roster marks every app as a bot**: `conversations.members` lists ids only;
+  each member is now looked up through the cached `users.info` (up to 300 per
+  read, 8 at a time), and other apps, bot users and Slackbot get `isBot: true`.
+  The facilitator seeds its electorate from the roster, so Jira, Giphy or
+  another agent's app are no longer expected voters. A failed lookup leaves
+  the member a person.
+
 - **Readiness per conversation**: the plugin registers a `ChannelReadinessProvider`
   (`registerReadinessProvider`, feature-detected). For the app `asChannelKey`
   names it reports membership (`conversations.info`), whether the app may read
