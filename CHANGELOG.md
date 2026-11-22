@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.6.0
 
 Native facilitators in Slack (issue #6, spec 2043 §5.3, §5.5, §6.4).
 
