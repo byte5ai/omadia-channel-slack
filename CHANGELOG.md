@@ -1,5 +1,69 @@
 # Changelog
 
+## Unreleased
+
+Native facilitators in Slack (issue #6, spec 2043 §5.3, §5.5, §6.4).
+
+- **Roster marks every app as a bot**: `conversations.members` lists ids only;
+  each member is now looked up through the cached `users.info` (up to 300 per
+  read, 8 at a time), and other apps, bot users and Slackbot get `isBot: true`.
+  The facilitator seeds its electorate from the roster, so Jira, Giphy or
+  another agent's app are no longer expected voters. A failed lookup leaves
+  the member a person.
+
+- **Readiness per conversation**: the plugin registers a `ChannelReadinessProvider`
+  (`registerReadinessProvider`, feature-detected). For the app `asChannelKey`
+  names it reports membership (`conversations.info`), whether the app may read
+  every message (the `*:history` scope of the conversation kind, from the
+  token's `auth.test` scopes) and whether it can post (`chat:write`, not
+  archived). Before
+  this, the kernel treated no Slack conversation as ready.
+- **Edits, deletions and reactions** reach the kernel's message record
+  (`edited`, `deleted`, `reaction`) under the receiving app's key, following
+  the subscription (`conversationDelivery`), the DM policy and the allowlist.
+  They start no turn. Reactions need the optional bot scope `reactions:read`
+  and the `reaction_added` / `reaction_removed` events.
+- **Membership events**: `member_joined_channel` / `member_left_channel` become
+  `members_added` / `members_removed` (`emitConversationEvent`), the app's own
+  join `bot_added` with the inviter; the first human group message per
+  conversation emits `bot_present`. Subscribe the two `member_*` events.
+- **Roster**: a member joining or leaving drops the cached read; `fresh: true`
+  still always asks Slack, a failed read is `unknown`.
+- **Fix: a mention whose `message` event arrives before its `app_mention`**
+  started no turn (the duplicate check kept the first, unmentioned copy). A
+  message naming the bot is now a mention whichever copy comes first.
+- **Thread replies also sent to the channel** (`thread_broadcast`) and messages
+  with a file (`file_share`) count as new messages instead of being dropped.
+- **Other apps are no participants**: members joining or leaving are looked up
+  (`users.info`, cached); apps and bots are not emitted, and another app's
+  reactions and edits are not recorded. Members carry their display name.
+- **`bot_present` is re-sent** at most every 12 hours (the kernel forgets it
+  after 24), instead of once per process.
+- **Readiness applies the channel's own policy**: DMs switched off is
+  `unsupported_conversation`, a conversation outside the allowlist
+  `consent_missing`. Every report is `verified: false` (the `message.*`
+  subscriptions cannot be proven). `conversations.info` runs without retries
+  and with a 5 s timeout (failure: `graph_error`); granted scopes are re-read
+  through `auth.test` after 5 minutes.
+- **Capability snapshot** (`registerMeetingSourceProvider`, spec 2043 §6.1):
+  inputs text and message edits, reactions only with `reactions:read`;
+  outputs text, mentions, private messages (a DM: text). Chat modality.
+- **Deleting a message with thread replies** (a `tombstone` in
+  `message_changed`) is reported as a deletion.
+- **Edits after the dedup window**: an edit with the same `edited.ts` and text
+  as the last one emitted is not emitted again.
+- **Event order per conversation**: events of one conversation reach the kernel
+  in arrival order (an edit no longer overtakes its `created`); turns still run
+  in parallel.
+- **Roster**: a read that started before a member change is not cached.
+- **DM replies name their message**: a private turn answering a DM in its
+  thread carries `TurnOrigin.replyToMessageId` (the thread root `ts`, the
+  `messageId` reported for the plugin's own post; since channel-sdk 0.3.11,
+  set structurally so it builds against older SDKs).
+- **Setup text** in the admin UI lists `member_joined_channel`,
+  `member_left_channel`, `message.groups`, `message.mpim`, `reactions:read`
+  and `reaction_added` / `reaction_removed`.
+
 ## 0.5.0
 
 Bot reactions (spec 2043 §5.14, byte5ai/omadia#2061). Needs a kernel with

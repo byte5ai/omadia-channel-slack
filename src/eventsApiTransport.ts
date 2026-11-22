@@ -3,6 +3,7 @@ import { createHmac, timingSafeEqual } from 'node:crypto';
 import express, { type Request, type Response, type Router } from 'express';
 
 import type { SlackEnvelopeBody, SlackSlashCommandPayload } from './inbound.js';
+import { routeSlackEvent } from './eventRouter.js';
 import type { SlackChannel } from './slackChannel.js';
 import { errMessage } from './slackChannel.js';
 import type { LogSink } from './logger.js';
@@ -30,9 +31,9 @@ interface RawBodyRequest extends Request {
  * event deliveries to a public endpoint (`<public_base_url>/api/slack/events`).
  * The router verifies the `X-Slack-Signature` HMAC over the raw body, answers
  * the one-time `url_verification` challenge, then ACKs every delivery within
- * Slack's 3-second budget and dispatches message/app_mention events
- * asynchronously into {@link SlackChannel.ingest} (orchestrator turns far exceed
- * 3s, so we never block the response on them). Slash commands (`/agent`) arrive
+ * Slack's 3-second budget and dispatches the event asynchronously through
+ * {@link routeSlackEvent} (messages, edits, reactions, membership; orchestrator
+ * turns far exceed 3s, so we never block the response on them). Slash commands (`/agent`) arrive
  * form-encoded on `<public_base_url>/api/slack/commands`, are verified with the
  * same signature and go into {@link SlackChannel.ingestCommand}.
  */
@@ -134,9 +135,7 @@ function eventsRouter(prefix: string, resolve: (req: Request) => EventsApiRouter
     res.json({ ok: true });
     if (!deps.state.urlVerified) patchState(deps.state, { urlVerified: true });
 
-    const event = body.event;
-    if (event.type !== 'message' && event.type !== 'app_mention') return;
-    void deps.channel.ingest(event, body.team_id).catch((err: unknown) => {
+    void routeSlackEvent(deps.channel, body.event, body.team_id).catch((err: unknown) => {
       deps.log('error', 'Slack Events API ingest failed', { error: errMessage(err) });
     });
   });

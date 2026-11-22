@@ -366,3 +366,21 @@ test('a verified e-mail makes the routing principal user:<e-mail> and reaches th
   assert.equal(asked[0]?.principal, 'user:anna@example.com');
   assert.deepEqual(seen[0]?.origin?.principal, { kind: 'user', userId: 'anna@example.com' });
 });
+
+test('a DM reply in a thread names the message it answers (replyToMessageId, channel-sdk 0.3.11); a channel thread and a top-level DM do not', async () => {
+  const originOf = async (over: Partial<SlackMessageEvent>) => {
+    const seen: ChatInput[] = [];
+    await handleSlackTurn(deps({ outbox: new SpyOutbox(), defaultAgent: agentReturning(answer('ok'), seen) }), turnFor(over));
+    return seen[0]?.origin as (Record<string, unknown> & { messageId?: string }) | undefined;
+  };
+  // The reminder DM this plugin sent was reported with messageId = its ts '90.5'.
+  const reply = await originOf({ channel: 'D1', channel_type: 'im', ts: '100.1', thread_ts: '90.5' });
+  assert.equal(reply?.['replyToMessageId'], '90.5');
+  assert.equal(reply?.messageId, '100.1');
+  const topLevel = await originOf({ channel: 'D1', channel_type: 'im', ts: '100.1' });
+  assert.equal(topLevel?.['replyToMessageId'], undefined);
+  const root = await originOf({ channel: 'D1', channel_type: 'im', ts: '100.1', thread_ts: '100.1' });
+  assert.equal(root?.['replyToMessageId'], undefined);
+  const group = await originOf({ channel: 'C1', channel_type: 'channel', ts: '100.1', thread_ts: '90.5' });
+  assert.equal(group?.['replyToMessageId'], undefined, 'private turns only');
+});

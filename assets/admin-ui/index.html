@@ -94,12 +94,20 @@
             <li><b>OAuth &amp; Permissions</b> → Bot-Scopes setzen
               (<code>app_mentions:read</code>, <code>chat:write</code>,
               <code>reactions:write</code>, <code>im:history</code>,
-              <code>channels:history</code>, <code>users:read</code>) → App
-              installieren → Bot-Token (<code>xoxb-…</code>).</li>
+              <code>channels:history</code>, <code>groups:history</code>,
+              <code>mpim:history</code>, <code>channels:read</code>,
+              <code>groups:read</code>, <code>users:read</code>, für Reaktionen
+              <code>reactions:read</code>) → App installieren → Bot-Token
+              (<code>xoxb-…</code>).</li>
             <li id="setup-events"><b>Events API:</b> Signing Secret (Basic Information)
               hinterlegen, dann unter <b>Event Subscriptions</b> die Request URL oben
               eintragen und die Bot-Events <code>app_mention</code>,
-              <code>message.im</code> (opt. <code>message.channels</code>) abonnieren.</li>
+              <code>message.im</code>, <code>message.channels</code>,
+              <code>message.groups</code>, <code>message.mpim</code>,
+              <code>member_joined_channel</code>, <code>member_left_channel</code>
+              (für Reaktionen <code>reaction_added</code>,
+              <code>reaction_removed</code>) abonnieren. Im Socket Mode
+              dieselben Bot-Events abonnieren.</li>
             <li id="setup-socket"><b>Socket Mode:</b> Socket Mode aktivieren + App-Level-Token
               mit <code>connections:write</code> (<code>xapp-…</code>) hinterlegen.</li>
             <li>Bot in die gewünschten Channels einladen (<code>/invite @bot</code>).</li>

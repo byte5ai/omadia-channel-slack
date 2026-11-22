@@ -2,7 +2,19 @@ import { LogLevel } from '@slack/logger';
 import { WebClient } from '@slack/web-api';
 import type { SlackDirectoryUser } from './slackPeopleDirectory.js';
 
-import type { ConversationMessageEvent, IncomingTurn } from '@omadia/channel-sdk';
+import type { ConversationMembershipEvent, ConversationMessageEvent, IncomingTurn } from '@omadia/channel-sdk';
+
+import {
+  conversationTypeOf,
+  isTombstone,
+  mentionsUser,
+  SlackConversationEvents,
+  type SlackMembershipEvent,
+  type SlackMessageChangedEvent,
+  type SlackMessageDeletedEvent,
+  type SlackReactionEvent,
+} from './conversationEvents.js';
+import { HUMAN_MESSAGE_SUBTYPES, type SlackEventTarget } from './eventRouter.js';
 
 import {
   buildIncomingTurn,
@@ -11,13 +23,14 @@ import {
   extractText,
   stripMention,
   type SlackMessageEvent,
-  type SlackSenderProfile,
   type SlackSlashCommandPayload,
   type TurnSource,
 } from './inbound.js';
 import type { SlackSink } from './outbox.js';
 import type { SlackReactor } from './slackSendProviders.js';
 import { makeSlackLogger, type LogSink } from './logger.js';
+import { KeyedSerialQueue } from './serialQueue.js';
+import { SlackProfileCache, type SlackMemberProfile } from './slackProfiles.js';
 import { patchState, type ChannelState } from './state.js';
 
 export interface AccessPolicy {
@@ -51,6 +64,21 @@ export interface SlackChannelDeps {
   reportMessage?: (event: ConversationMessageEvent) => Promise<{ answeredCard: boolean }>;
   /** `core.conversationDelivery`: what the bot identity is handed of a conversation. Absent: emit. */
   deliveryOf?: (conversationId: string, channelKey: string) => 'all' | 'addressed' | 'none';
+  /** `core.emitConversationEvent`: members joining and leaving, the bot added or present. Absent: nothing emitted. */
+  emitMembership?: (event: ConversationMembershipEvent) => void;
+  /** A conversation's members changed: drop its cached roster. */
+  onMembershipChanged?: (conversationId: string) => void;
+  /** Injected for tests (scope refresh, `bot_present` interval, profile cache). */
+  now?: () => number;
+}
+
+/** What `conversations.info` says about this app in a conversation (readiness). */
+export interface SlackConversationInfo {
+  isMember: boolean;
+  isIm: boolean;
+  isMpim: boolean;
+  isPrivate: boolean;
+  isArchived: boolean;
 }
 
 /**
@@ -77,11 +105,16 @@ const USERS_CACHE_TTL_MS = 5 * 60 * 1000;
 const USERS_PAGE_SIZE = 200;
 const USERS_CACHE_MAX = 2_000;
 
-/** Sender profiles (`users.info`): a known member keeps its profile for an hour, a failed lookup is retried after a minute, and a slow Slack never holds a turn longer than the timeout. */
-const PROFILE_TTL_MS = 60 * 60 * 1000;
-const PROFILE_FAILURE_TTL_MS = 60 * 1000;
-const PROFILE_TIMEOUT_MS = 1_500;
-const PROFILE_CACHE_MAX = 2_000;
+/**
+ * The Web client for readiness probes (`conversations.info`, the scope
+ * refresh through `auth.test`): no retries and a short timeout. The default
+ * client retries for up to ~30 minutes, which a readiness check (and the
+ * facilitator start behind it) must not wait for; a failure is `graph_error`.
+ */
+export const PROBE_CLIENT_OPTIONS = Object.freeze({ retryConfig: Object.freeze({ retries: 0 }), timeout: 5_000 });
+
+/** Granted scopes are read again (`auth.test`) when older than this, so readiness follows a reinstall with new scopes. */
+export const SCOPES_TTL_MS = 5 * 60 * 1000;
 
 /** The kernel's verdict on a message that would start a turn must never hold the turn longer than this. */
 const REPORT_TIMEOUT_MS = 1_500;
@@ -102,10 +135,21 @@ const MEMBERS_PAGE_SIZE = 200;
  * for a bot outside its AI-assistant surface, so there is nothing to show
  * while the answer is being prepared.
  */
-export class SlackChannel implements SlackSink, SlackReactor {
+export class SlackChannel implements SlackSink, SlackReactor, SlackEventTarget {
   private readonly web: WebClient;
+  /** Readiness probes: {@link PROBE_CLIENT_OPTIONS}. */
+  private readonly probe: WebClient;
   private botUserId = '';
-  private readonly profiles = new Map<string, { profile: SlackSenderProfile; expiresAt: number }>();
+  /** The bot token's granted scopes, from `auth.test` (`undefined`: Slack did not say). */
+  private scopes: readonly string[] | undefined;
+  /** When {@link scopes} were read (epoch ms); 0 = never. */
+  private scopesReadAt = 0;
+  private scopesRefresh: Promise<readonly string[] | undefined> | undefined;
+  private readonly now: () => number;
+  private readonly events: SlackConversationEvents;
+  private readonly profiles: SlackProfileCache;
+  /** Per conversation, events are handled in arrival order (a created before its edit). */
+  private readonly serial = new KeyedSerialQueue();
   private usersCache: { users: SlackDirectoryUser[]; truncated: boolean; fetchedAt: number } | undefined;
   /** `${channel}:${ts}` of messages already handled — Slack delivers a mention
    *  as BOTH an `app_mention` and a `message` event (and the Events API may
@@ -117,6 +161,32 @@ export class SlackChannel implements SlackSink, SlackReactor {
       logger: makeSlackLogger(deps.log),
       logLevel: LogLevel.ERROR,
     });
+    this.probe = new WebClient(deps.botToken, {
+      logger: makeSlackLogger(deps.log),
+      logLevel: LogLevel.ERROR,
+      ...PROBE_CLIENT_OPTIONS,
+    });
+    this.now = deps.now ?? Date.now;
+    this.profiles = new SlackProfileCache({
+      // Late-bound: tests replace `web.users.info`.
+      lookup: (user) => this.web.users.info({ user, include_locale: true }),
+      locale: supportedLocale,
+      log: (message, context) => deps.log('warn', message, context),
+      now: this.now,
+    });
+    this.events = new SlackConversationEvents({
+      channelId: deps.channelId,
+      selfUserId: () => this.botUserId,
+      channelKey: () => this.channelKey(),
+      ...(deps.emitMessage ? { emitMessage: deps.emitMessage } : {}),
+      ...(deps.emitMembership ? { emitMembership: deps.emitMembership } : {}),
+      ...(deps.deliveryOf ? { deliveryOf: deps.deliveryOf } : {}),
+      ...(deps.onMembershipChanged ? { onMembershipChanged: deps.onMembershipChanged } : {}),
+      admits: (conversationId, userId) => this.admits(conversationId, userId),
+      memberOf: (userId) => this.senderProfile(userId),
+      log: (message, context) => deps.log('warn', message, context),
+      now: this.now,
+    });
   }
 
   /** Validate the bot token and learn our own identity — needed to ignore our
@@ -125,6 +195,7 @@ export class SlackChannel implements SlackSink, SlackReactor {
   async init(): Promise<void> {
     const auth = await this.web.auth.test();
     this.botUserId = typeof auth.user_id === 'string' ? auth.user_id : '';
+    this.rememberScopes(auth.response_metadata?.scopes);
     patchState(this.deps.state, {
       me: {
         botUserId: this.botUserId,
@@ -148,6 +219,41 @@ export class SlackChannel implements SlackSink, SlackReactor {
     await this.process(event, teamId, {});
   }
 
+  private rememberScopes(raw: unknown): void {
+    this.scopes = Array.isArray(raw) ? raw.filter((scope): scope is string => typeof scope === 'string') : undefined;
+    this.scopesReadAt = this.now();
+  }
+
+  /**
+   * The granted scopes, read again through `auth.test` (probe client) when
+   * older than {@link SCOPES_TTL_MS}: an operator who adds a scope and
+   * reinstalls the app must not see a stale readiness until the next
+   * reconnect. A failed refresh keeps the last known scopes. Never throws.
+   */
+  async refreshScopes(): Promise<readonly string[] | undefined> {
+    if (this.scopesReadAt !== 0 && this.now() - this.scopesReadAt < SCOPES_TTL_MS) return this.scopes;
+    this.scopesRefresh ??= this.probe.auth
+      .test()
+      .then((auth) => {
+        this.rememberScopes(auth.response_metadata?.scopes);
+        return this.scopes;
+      })
+      .catch((err: unknown) => {
+        this.deps.log('warn', 'Slack scope refresh failed: readiness uses the last known scopes', { error: errMessage(err) });
+        this.scopesReadAt = this.now();
+        return this.scopes;
+      })
+      .finally(() => {
+        this.scopesRefresh = undefined;
+      });
+    return this.scopesRefresh;
+  }
+
+  /** The DM policy and allowlist this app applies (readiness states what they drop). */
+  get policy(): AccessPolicy {
+    return this.deps.policy;
+  }
+
   /**
    * Process a native slash command (`/agent`, `/agents`). The text is handed
    * to the kernel unchanged as an ordinary inbound message (the kernel's
@@ -163,25 +269,47 @@ export class SlackChannel implements SlackSink, SlackReactor {
     await this.process(event, payload.team_id, { command: responseUrl ? { responseUrl } : {} });
   }
 
+  /**
+   * The gates and the kernel's message record run in the conversation's
+   * serial queue (so an edit cannot overtake its created); the turn itself
+   * runs after it, so a long turn never holds the conversation's events.
+   */
   private async process(
     event: SlackMessageEvent,
     teamId: string | undefined,
     source: TurnSource,
   ): Promise<void> {
-    const key = `${event.channel}:${event.ts}`;
-    if (this.handledKeys.has(key)) return;
-    this.handledKeys.add(key);
-    this.trimHandledKeys();
+    const turn = await this.serial.run(event.channel, () => this.admit(event, teamId, source));
+    if (!turn) return;
+    try {
+      await this.deps.onMessage(turn);
+    } catch (err) {
+      this.deps.log('error', 'error handling inbound Slack message', {
+        channel: event.channel,
+        error: errMessage(err),
+      });
+    }
+  }
+
+  /** The loop guard, the kernel's record and the access policy: the turn to run, or `undefined`. */
+  private async admit(
+    event: SlackMessageEvent,
+    teamId: string | undefined,
+    source: TurnSource,
+  ): Promise<IncomingTurn | undefined> {
+    if (!this.firstTime(`${event.channel}:${event.ts}`)) return undefined;
 
     try {
       // Never react to bot posts (incl. our own replies) — prevents reply loops.
-      if (event.bot_id || event.subtype === 'bot_message') return;
-      if (this.botUserId && event.user === this.botUserId) return;
+      if (event.bot_id || event.subtype === 'bot_message') return undefined;
+      if (this.botUserId && event.user === this.botUserId) return undefined;
 
-      const isMention = event.type === 'app_mention';
-      // Plain message events with a subtype are edits/joins/etc. — skip them.
-      // app_mention never carries a subtype.
-      if (!isMention && event.subtype) return;
+      // Slack delivers a mention as an `app_mention` AND a `message`, in either
+      // order: whichever comes first is the mention (the second is a duplicate).
+      const isMention = event.type === 'app_mention' || mentionsUser(event.text, this.botUserId);
+      // Other subtypes (joins, topic changes, ...) are no person's new message;
+      // edits and deletions are routed to `ingestEdit` / `ingestDeletion`.
+      if (event.subtype && !HUMAN_MESSAGE_SUBTYPES.has(event.subtype)) return undefined;
 
       const channelType = event.channel_type ?? 'channel';
       const isDm = channelType === 'im';
@@ -194,12 +322,13 @@ export class SlackChannel implements SlackSink, SlackReactor {
       const dmOff = isDm && !this.deps.policy.allowDms;
       const allowlisted = this.isAllowlisted(event);
       if (!source.command && !dmOff && allowlisted) {
+        if (event.user) this.events.present(event.channel, event.user);
         const startsTurn = isMention || isDm || this.deps.policy.respondInChannels === 'all';
         if (await this.emitCreated(event, teamId, startsTurn)) {
           this.deps.log('info', 'Slack message consumed as the answer to an open question: no turn', {
             channel: event.channel,
           });
-          return;
+          return undefined;
         }
       }
 
@@ -209,13 +338,13 @@ export class SlackChannel implements SlackSink, SlackReactor {
       // switched off for commands too.
       if (isDm && !this.deps.policy.allowDms) {
         this.deps.log('info', 'Slack inbound skipped: DMs disabled', { channel: event.channel });
-        return;
+        return undefined;
       }
       if (!isMention && !isDm && this.deps.policy.respondInChannels !== 'all') {
         this.deps.log('info', 'Slack inbound skipped: channel message without mention', {
           channel: event.channel,
         });
-        return;
+        return undefined;
       }
 
       // Allowlist by channel id and/or user id.
@@ -224,14 +353,14 @@ export class SlackChannel implements SlackSink, SlackReactor {
           channel: event.channel,
           user: event.user,
         });
-        return;
+        return undefined;
       }
 
       let text = extractText(event);
       if (text && this.botUserId) text = stripMention(text, this.botUserId);
       if (!text) {
         this.deps.log('info', 'Slack inbound skipped: no text content', { channel: event.channel });
-        return;
+        return undefined;
       }
 
       this.deps.log('info', 'Slack message received', {
@@ -243,12 +372,13 @@ export class SlackChannel implements SlackSink, SlackReactor {
       patchState(this.deps.state, { lastInboundAt: Date.now() });
 
       const profile = event.user ? await this.senderProfile(event.user) : {};
-      await this.deps.onMessage(buildIncomingTurn(this.deps.channelId, event, text, teamId, source, profile));
+      return buildIncomingTurn(this.deps.channelId, event, text, teamId, source, profile);
     } catch (err) {
       this.deps.log('error', 'error handling inbound Slack message', {
         channel: event.channel,
         error: errMessage(err),
       });
+      return undefined;
     }
   }
 
@@ -257,31 +387,65 @@ export class SlackChannel implements SlackSink, SlackReactor {
    * `users:read.email` for the address). The e-mail makes the principal the
    * cross-channel one (`user:<e-mail>`), the language is the notice locale.
    * Never throws and never blocks a turn for long: an unknown profile is `{}`
-   * (principal `user:slack-user:<id>`, German notices).
+   * (principal `user:slack-user:<id>`, German notices). Also says whether
+   * the member is an app (`isBot`) and its display name.
    */
-  async senderProfile(userId: string): Promise<SlackSenderProfile> {
-    const cached = this.profiles.get(userId);
-    if (cached && cached.expiresAt > Date.now()) return cached.profile;
-    try {
-      const res = await Promise.race([
-        this.web.users.info({ user: userId, include_locale: true }),
-        new Promise<never>((_, reject) => setTimeout(() => reject(new Error('users.info timed out')), PROFILE_TIMEOUT_MS).unref()),
-      ]);
-      const email = res.user?.profile?.email?.trim().toLowerCase();
-      const locale = supportedLocale(res.user?.locale);
-      const profile: SlackSenderProfile = { ...(email ? { email } : {}), ...(locale ? { locale } : {}) };
-      this.rememberProfile(userId, profile, PROFILE_TTL_MS);
-      return profile;
-    } catch (err) {
-      this.deps.log('warn', 'Slack sender profile unavailable', { error: errMessage(err) });
-      this.rememberProfile(userId, {}, PROFILE_FAILURE_TTL_MS);
-      return {};
-    }
+  senderProfile(userId: string): Promise<SlackMemberProfile> {
+    return this.profiles.get(userId);
   }
 
-  private rememberProfile(userId: string, profile: SlackSenderProfile, ttlMs: number): void {
-    if (this.profiles.size >= PROFILE_CACHE_MAX) this.profiles.clear();
-    this.profiles.set(userId, { profile, expiresAt: Date.now() + ttlMs });
+  /**
+   * A message edit (`message_changed`): the next revision for the kernel's
+   * record. A tombstone (a deleted message with thread replies) is a
+   * deletion, under the deletion's dedup key.
+   */
+  async ingestEdit(event: SlackMessageChangedEvent, teamId: string | undefined): Promise<void> {
+    const key = isTombstone(event)
+      ? `delete:${event.channel}:${event.message?.ts ?? event.previous_message?.ts ?? event.ts}`
+      : `edit:${event.channel}:${event.message?.ts ?? ''}:${event.message?.edited?.ts ?? event.ts}`;
+    await this.serial.run(event.channel, async () => {
+      if (this.firstTime(key)) await this.events.edited(event, teamId);
+    });
+  }
+
+  /** A deleted message (`message_deleted`). */
+  async ingestDeletion(event: SlackMessageDeletedEvent, teamId: string | undefined): Promise<void> {
+    const deletedTs = event.deleted_ts ?? event.previous_message?.ts ?? event.ts;
+    await this.serial.run(event.channel, async () => {
+      if (this.firstTime(`delete:${event.channel}:${deletedTs}`)) await this.events.deleted(event, teamId);
+    });
+  }
+
+  /** `reaction_added` / `reaction_removed` (bot scope `reactions:read`). */
+  async ingestReaction(event: SlackReactionEvent, teamId: string | undefined): Promise<void> {
+    const key = `${event.type}:${event.item?.channel ?? ''}:${event.item?.ts ?? ''}:${event.user ?? ''}:${event.reaction ?? ''}:${event.event_ts ?? ''}`;
+    await this.serial.run(event.item?.channel ?? '', async () => {
+      if (this.firstTime(key)) await this.events.reaction(event, teamId);
+    });
+  }
+
+  /** `member_joined_channel` / `member_left_channel`. */
+  async ingestMembership(event: SlackMembershipEvent): Promise<void> {
+    await this.serial.run(event.channel ?? '', async () => {
+      if (this.firstTime(`${event.type}:${event.channel ?? ''}:${event.user ?? ''}:${event.event_ts ?? ''}`)) {
+        await this.events.membership(event);
+      }
+    });
+  }
+
+  /** The DM policy and allowlist for an event that is no new message. */
+  private admits(conversationId: string, userId: string | undefined): boolean {
+    if (conversationTypeOf(conversationId) === 'direct' && !this.deps.policy.allowDms) return false;
+    const { allowlist } = this.deps.policy;
+    return allowlist.size === 0 || allowlist.has(conversationId) || (userId !== undefined && allowlist.has(userId));
+  }
+
+  /** Slack retries deliveries: `true` the first time a key is seen. */
+  private firstTime(key: string): boolean {
+    if (this.handledKeys.has(key)) return false;
+    this.handledKeys.add(key);
+    this.trimHandledKeys();
+    return true;
   }
 
   private isAllowlisted(event: SlackMessageEvent): boolean {
@@ -317,7 +481,7 @@ export class SlackChannel implements SlackSink, SlackReactor {
       const text = raw ? stripMention(raw, this.botUserId) : undefined;
       const isDm = (event.channel_type ?? 'channel') === 'im';
       const profile = deliveryOf ? await this.senderProfile(event.user) : {};
-      const mentionsBot = event.type === 'app_mention' || (raw?.includes(`<@${this.botUserId}`) ?? false);
+      const mentionsBot = event.type === 'app_mention' || mentionsUser(raw, this.botUserId);
       const occurredAt = new Date(Number.parseFloat(event.ts) * 1000);
       const message: ConversationMessageEvent = {
         channelId: this.deps.channelId,
@@ -511,10 +675,33 @@ export class SlackChannel implements SlackSink, SlackReactor {
     return this.botUserId ? slackBotChannelKey(this.botUserId) : undefined;
   }
 
+  /** The bot token's granted scopes as `auth.test` reported them; `undefined` before `init` or when Slack did not say. */
+  get grantedScopes(): readonly string[] | undefined {
+    return this.scopes;
+  }
+
+  /**
+   * This app in one conversation (`conversations.info`; bot scopes
+   * `channels:read` / `groups:read` / `im:read` / `mpim:read`). Throws the Web
+   * API error (with `data.error`) so the readiness check can say why. Probe
+   * client: no retries, short timeout.
+   */
+  async conversationInfo(conversationId: string): Promise<SlackConversationInfo> {
+    const info = await this.probe.conversations.info({ channel: conversationId });
+    const c = info.channel;
+    return {
+      isMember: c?.is_member === true,
+      isIm: c?.is_im === true,
+      isMpim: c?.is_mpim === true,
+      isPrivate: c?.is_private === true || c?.is_group === true,
+      isArchived: c?.is_archived === true,
+    };
+  }
+
   /** Is this bot a member of the conversation? For "who can be heard here". */
   async isMemberOf(conversationId: string): Promise<boolean> {
     try {
-      const info = await this.web.conversations.info({ channel: conversationId });
+      const info = await this.probe.conversations.info({ channel: conversationId });
       return info.channel?.is_member === true || info.channel?.is_im === true;
     } catch {
       return false;

@@ -16,11 +16,16 @@ const SECRET = 'signing-secret';
 function fakeChannel() {
   const events: unknown[] = [];
   const commands: SlackSlashCommandPayload[] = [];
+  const others: unknown[] = [];
   const channel = {
     ingest: async (e: unknown) => void events.push(e),
+    ingestEdit: async (e: unknown) => void others.push(e),
+    ingestDeletion: async (e: unknown) => void others.push(e),
+    ingestReaction: async (e: unknown) => void others.push(e),
+    ingestMembership: async (e: unknown) => void others.push(e),
     ingestCommand: async (p: SlackSlashCommandPayload) => void commands.push(p),
   } as unknown as SlackChannel;
-  return { channel, events, commands };
+  return { channel, events, commands, others };
 }
 
 async function withServer<T>(channel: SlackChannel, run: (base: string) => Promise<T>): Promise<T> {
@@ -82,4 +87,35 @@ test('Socket Mode: slash_commands envelopes go to ingestCommand, events_api mess
   await routeSocketEnvelope(channel, undefined, undefined);
   assert.equal(commands.length, 1);
   assert.equal(events.length, 1);
+});
+
+test('routeSlackEvent: edits, deletions, reactions and membership go to their handlers; unknown types are ignored', async () => {
+  const { channel, events, others } = fakeChannel();
+  const route = (event: unknown) => routeSocketEnvelope(channel, 'events_api', { type: 'event_callback', team_id: 'T1', event });
+  await route({ type: 'message', subtype: 'message_changed', channel: 'C1', ts: '2.0', message: { user: 'U1', ts: '1.1', text: 'B', edited: { ts: '2.0' } } });
+  await route({ type: 'message', subtype: 'message_deleted', channel: 'C1', ts: '3.0', deleted_ts: '1.1' });
+  await route({ type: 'reaction_removed', user: 'U1', reaction: '+1', item: { type: 'message', channel: 'C1', ts: '1.1' } });
+  await route({ type: 'member_joined_channel', user: 'U5', channel: 'C1' });
+  await route({ type: 'member_left_channel', user: 'U5', channel: 'C1' });
+  await route({ type: 'channel_rename', channel: { id: 'C1' } });
+  await route({ type: 'message', ts: '1.1' }); // no channel: dropped
+  assert.equal(events.length, 0);
+  assert.deepEqual(others.map((e) => (e as { subtype?: string; type: string }).subtype ?? (e as { type: string }).type), [
+    'message_changed',
+    'message_deleted',
+    'reaction_removed',
+    'member_joined_channel',
+    'member_left_channel',
+  ]);
+});
+
+test('Events API: a member_joined_channel delivery is routed to ingestMembership', async () => {
+  const { channel, others } = fakeChannel();
+  const body = JSON.stringify({ type: 'event_callback', team_id: 'T1', event: { type: 'member_joined_channel', user: 'U5', channel: 'C1', event_ts: '9.9' } });
+  await withServer(channel, async (base) => {
+    const res = await fetch(`${base}/api/slack/events`, { method: 'POST', headers: { 'content-type': 'application/json', ...signed(body) }, body });
+    assert.equal(res.status, 200);
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(others.length, 1);
 });

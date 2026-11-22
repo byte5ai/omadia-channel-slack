@@ -33,6 +33,7 @@ const MIRA_SECRET = 'a'.repeat(32);
 const MIRA_APP_TOKEN = 'xapp-fake-mira-agent-app-level-token-22222';
 
 const users = { userIdByEmail: async () => undefined };
+const NOT_MEMBER = { isMember: false, isIm: false, isMpim: false, isPrivate: false, isArchived: false };
 
 function app(member: string, sink = new RecordingSink(), member_of = true): SlackAgentApp & { closed: number } {
   const a = {
@@ -41,6 +42,7 @@ function app(member: string, sink = new RecordingSink(), member_of = true): Slac
     name: `bot-${member}`,
     send: { outbox: new SlackOutbox(sink, undefined, true), users, reactions: { addReaction: async () => undefined } },
     roster: { channelType: 'slack', getRoster: async () => undefined },
+    readiness: { grantedScopes: undefined, conversationInfo: async () => ({ ...NOT_MEMBER, isMember: member_of }) },
     isMemberOf: async () => member_of,
     status: () => 'connected' as const,
     closed: 0,
@@ -67,6 +69,7 @@ function rig(mode: 'webhook' | 'socket', checkToken: (t: string) => Promise<Slac
     channelKey: () => 'slack-bot:udefault',
     send: { outbox: new SlackOutbox(sink), users, reactions: { addReaction: async () => undefined } },
     roster: { channelType: 'slack', getRoster: async () => undefined },
+    readiness: { grantedScopes: undefined, conversationInfo: async () => NOT_MEMBER },
     botToken: DEFAULT_TOKEN,
   });
   const secrets = vault();
@@ -269,5 +272,27 @@ describe('agent app webhooks', () => {
     assert.equal(await post(router, '/umira01/events', challenge, 'b'.repeat(32)), 401);
     assert.equal(await post(router, '/uother/events', challenge, MIRA_SECRET), 404);
     assert.equal(await post(router, '/UMIRA01/events', challenge, MIRA_SECRET), 200, 'the member id as Slack shows it');
+  });
+});
+
+describe('two facilitators (spec 2043 §9 criterion 9, issue #6)', () => {
+  test('two agent apps post as two distinct identities in two groups, never through each other or the shared app', async () => {
+    const shared = new RecordingSink();
+    const { fleet } = rig('webhook', mira, shared);
+    const miraSink = new RecordingSink();
+    const benSink = new RecordingSink();
+    await fleet.add(app('UMIRA01', miraSink));
+    await fleet.add(app('UBEN01', benSink));
+    const { conversation } = createSlackSendProviders((key) => fleet.sendFor(key));
+    const a = await conversation.sendToConversation('C-GROUP-A', { text: 'Abstimmung offen' }, { asChannelKey: 'slack-bot:umira01' });
+    const b = await conversation.sendToConversation('C-GROUP-B', { text: 'Runde zwei' }, { asChannelKey: 'slack-bot:uben01' });
+    assert.equal(a.outcome, 'delivered');
+    assert.equal(b.outcome, 'delivered');
+    assert.deepEqual(miraSink.calls.map((c) => c.target), ['C-GROUP-A']);
+    assert.deepEqual(benSink.calls.map((c) => c.target), ['C-GROUP-B']);
+    assert.equal(shared.calls.length, 0);
+    // Readiness is read per app as well: each key names its own app.
+    assert.notEqual(fleet.readinessFor('slack-bot:umira01'), fleet.readinessFor('slack-bot:uben01'));
+    assert.equal(fleet.readinessFor('slack-bot:unknown'), undefined);
   });
 });

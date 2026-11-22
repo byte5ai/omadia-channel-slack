@@ -4,7 +4,14 @@ import { afterEach, mock, test } from 'node:test';
 import type { ConversationMessageEvent, IncomingTurn } from '@omadia/channel-sdk';
 
 import type { SlackSlashCommandPayload } from '../src/inbound.js';
-import { SlackChannel, validResponseUrl, type AccessPolicy, type SlackChannelDeps } from '../src/slackChannel.js';
+import {
+  PROBE_CLIENT_OPTIONS,
+  SCOPES_TTL_MS,
+  SlackChannel,
+  validResponseUrl,
+  type AccessPolicy,
+  type SlackChannelDeps,
+} from '../src/slackChannel.js';
 import { createChannelState } from '../src/state.js';
 
 const URL_OK = 'https://hooks.slack.com/commands/T1/1/x';
@@ -183,7 +190,23 @@ test('a mention of the bot sets addressedToBot, a plain message does not; the bo
   assert.deepEqual(events.map((e) => e.addressedToBot), [true, true, undefined]);
   assert.equal(events[0]?.text, 'Antwort 2');
   assert.equal(events.length, 3, 'also the message that starts no turn is recorded');
-  assert.equal(turns.length, 1, 'the mention gate still decides on turns');
+  assert.equal(turns.length, 2, 'the mention gate still decides on turns: a message event naming the bot is a mention too');
+});
+
+test('a mention whose message event arrives before its app_mention starts exactly one turn', async () => {
+  const { channel, turns } = make();
+  await channel.ingest({ type: 'message', channel: 'C1', user: 'U1', text: '<@UBOT> 1. A 2. C 3. B', ts: '6.6', channel_type: 'channel' }, 'T1');
+  await channel.ingest({ type: 'app_mention', channel: 'C1', user: 'U1', text: '<@UBOT> 1. A 2. C 3. B', ts: '6.6', channel_type: 'channel' }, 'T1');
+  assert.equal(turns.length, 1);
+  assert.equal(turns[0]?.text, '1. A 2. C 3. B');
+});
+
+test('a thread reply also sent to the channel and a message with a file are new messages; a join is not', async () => {
+  const { channel, events } = emitting();
+  await channel.ingest({ type: 'message', subtype: 'thread_broadcast', channel: 'C1', user: 'U1', text: 'A > B', ts: '7.1', thread_ts: '7.0', channel_type: 'channel' }, 'T1');
+  await channel.ingest({ type: 'message', subtype: 'file_share', channel: 'C1', user: 'U2', text: 'B > A', ts: '7.2', channel_type: 'channel' }, 'T1');
+  await channel.ingest({ type: 'message', subtype: 'channel_join', channel: 'C1', user: 'U3', text: '<@U3> has joined', ts: '7.3', channel_type: 'channel' }, 'T1');
+  assert.deepEqual(events.map((e) => e.messageId), ['7.1', '7.2']);
 });
 
 test('the mention delivered twice (app_mention and message) is emitted once', async () => {
@@ -300,4 +323,53 @@ test('addReaction calls reactions.add as this app with the channel, the message 
   const { channel, reactions } = make();
   await channel.addReaction('C1', '1701.0001', '+1');
   assert.deepEqual(reactions, [{ channel: 'C1', timestamp: '1701.0001', name: '+1' }]);
+});
+
+test('conversationMembers: a failure on page two throws (the roster turns it into unknown), never a short list', async () => {
+  const { channel } = make();
+  const web = (channel as unknown as { web: { conversations: { members: (a: { cursor?: string }) => Promise<unknown> } } }).web;
+  web.conversations.members = async ({ cursor }) => {
+    if (!cursor) return { members: ['U1', 'U2'], response_metadata: { next_cursor: 'p2' } };
+    throw Object.assign(new Error('An API error occurred: ratelimited'), { data: { ok: false, error: 'ratelimited' } });
+  };
+  await assert.rejects(channel.conversationMembers('C1', 2_000), /ratelimited/);
+});
+
+test('readiness probes use a client without retries and a short timeout', async () => {
+  const { channel } = make();
+  const probe = (channel as unknown as { probe: { retryConfig: unknown; axios: { defaults: { timeout?: number } } } }).probe;
+  assert.deepEqual(probe.retryConfig, { retries: 0 });
+  assert.equal(probe.axios.defaults.timeout, PROBE_CLIENT_OPTIONS.timeout);
+  assert.ok(PROBE_CLIENT_OPTIONS.timeout <= 10_000);
+});
+
+test('granted scopes are re-read through auth.test once stale; a failed refresh keeps the last ones', async () => {
+  let now = 1_000;
+  const channel = new SlackChannel({
+    channelId: 'slack-1',
+    botToken: 'xoxb-test',
+    log: () => undefined,
+    state: createChannelState(),
+    policy: { respondInChannels: 'mention', allowDms: true, allowlist: new Set() },
+    onMessage: async () => undefined,
+    now: () => now,
+  });
+  const answers: Array<() => Promise<unknown>> = [
+    async () => ({ user_id: 'UBOT', response_metadata: { scopes: ['chat:write'] } }),
+    async () => ({ user_id: 'UBOT', response_metadata: { scopes: ['chat:write', 'channels:history'] } }),
+    async () => Promise.reject(new Error('socket hang up')),
+  ];
+  let calls = 0;
+  const stub = { test: async () => answers[calls++]!() };
+  (channel as unknown as { web: { auth: unknown } }).web.auth = stub;
+  (channel as unknown as { probe: { auth: unknown } }).probe.auth = stub;
+  await channel.init();
+  assert.deepEqual(await channel.refreshScopes(), ['chat:write'], 'fresh after init: no call');
+  assert.equal(calls, 1);
+  now += SCOPES_TTL_MS;
+  assert.deepEqual(await channel.refreshScopes(), ['chat:write', 'channels:history']);
+  assert.equal(calls, 2);
+  now += SCOPES_TTL_MS;
+  assert.deepEqual(await channel.refreshScopes(), ['chat:write', 'channels:history']);
+  assert.equal(calls, 3);
 });

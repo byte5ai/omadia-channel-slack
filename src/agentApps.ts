@@ -31,6 +31,7 @@ import type {
 
 import { SLACK_CHANNEL_TYPE } from './renderer.js';
 import { slackBotChannelKey } from './slackChannel.js';
+import type { SlackReadinessSource } from './slackReadiness.js';
 import type { SlackSendBot } from './slackSendProviders.js';
 
 /** Vault key of an agent app's credentials (JSON). */
@@ -87,6 +88,8 @@ export interface SlackAgentApp {
   readonly name: string;
   readonly send: SlackSendBot;
   readonly roster: ConversationRosterProvider;
+  /** Membership, scopes: what the readiness check reads of this app. */
+  readonly readiness: SlackReadinessSource;
   isMemberOf(conversationId: string): Promise<boolean>;
   status(): 'connected' | 'connecting' | 'error';
   close(): Promise<void>;
@@ -97,6 +100,7 @@ export interface SlackDefaultApp {
   channelKey(): string | undefined;
   readonly send: SlackSendBot;
   readonly roster: ConversationRosterProvider;
+  readonly readiness: SlackReadinessSource;
   /** The bot token of the installation's own app, to refuse it as an agent app. */
   readonly botToken: string;
 }
@@ -169,6 +173,12 @@ export class SlackAppFleet {
   sendFor(asChannelKey: string | undefined): SlackSendBot | undefined {
     if (this.isDefaultKey(asChannelKey)) return this.defaultApp.send;
     return this.agentApps.get(asChannelKey as string)?.send;
+  }
+
+  /** The app `asChannelKey` names (no key: the installation's own app); unknown key: none, never another app. */
+  readinessFor(asChannelKey: string | undefined): SlackReadinessSource | undefined {
+    if (this.isDefaultKey(asChannelKey)) return this.defaultApp.readiness;
+    return this.agentApps.get(asChannelKey as string)?.readiness;
   }
 
   rosterProvider(): ConversationRosterProvider {

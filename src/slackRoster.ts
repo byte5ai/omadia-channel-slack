@@ -5,12 +5,16 @@ import type {
   ConversationRosterRequest,
 } from '@omadia/channel-sdk';
 
+import { conversationTypeOf } from './conversationEvents.js';
 import { SLACK_CHANNEL_TYPE } from './renderer.js';
+import { SLACKBOT_USER_ID } from './slackProfiles.js';
 
 /** The slice of {@link SlackChannel} the roster needs. */
 export interface SlackMembersSource {
   readonly selfUserId: string;
   conversationMembers(channel: string, max: number): Promise<{ memberIds: string[]; truncated: boolean }>;
+  /** `users.info`, cached; never throws (an unknown member is `{}`). */
+  senderProfile?(userId: string): Promise<{ isBot?: boolean }>;
 }
 
 export interface SlackRosterDeps {
@@ -20,12 +24,41 @@ export interface SlackRosterDeps {
   now?: () => number;
 }
 
+/** The roster provider, plus a way to drop a conversation's cached read. */
+export interface SlackRosterProvider extends ConversationRosterProvider {
+  /** Members joined or left: the next read asks Slack again (also without `fresh`). */
+  forget(conversationId: string): void;
+}
+
 /** A roster read is reused this long; `fresh: true` bypasses it. */
 export const ROSTER_CACHE_TTL_MS = 30_000;
 /** Members listed at most; more than this is reported `partial`. */
 export const ROSTER_MAX_MEMBERS = 2_000;
 /** Cached conversations kept at most (oldest dropped first). */
 const ROSTER_CACHE_MAX_ENTRIES = 500;
+/** Members whose profile is looked up per read (bots marked); beyond, isBot stays open. */
+export const ROSTER_PROFILE_LOOKUPS_MAX = 300;
+/** Parallel `users.info` lookups per read (the cache answers repeats). */
+const ROSTER_PROFILE_CONCURRENCY = 8;
+
+/** Which members are apps or bots: own app, Slackbot, and `users.info` is_bot. */
+async function botIdsOf(source: SlackMembersSource, memberIds: readonly string[]): Promise<Set<string>> {
+  const bots = new Set<string>(memberIds.filter((id) => id === source.selfUserId || id === SLACKBOT_USER_ID));
+  const lookup = source.senderProfile?.bind(source);
+  if (!lookup) return bots;
+  const queue = memberIds.filter((id) => !bots.has(id)).slice(0, ROSTER_PROFILE_LOOKUPS_MAX);
+  const worker = async (): Promise<void> => {
+    for (let id = queue.shift(); id !== undefined; id = queue.shift()) {
+      try {
+        if ((await lookup(id)).isBot === true) bots.add(id);
+      } catch {
+        // A failed lookup leaves the member a person (the safe direction for an audience check).
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(ROSTER_PROFILE_CONCURRENCY, queue.length) }, worker));
+  return bots;
+}
 
 const SLACK_USER_KIND = 'slack-user' as const;
 
@@ -35,11 +68,6 @@ const SCOPE_BY_PREFIX: Readonly<Record<string, string>> = {
   G: 'groups:read',
   D: 'im:read',
 };
-
-/** A Slack DM id starts with `D`; every other conversation is a group. */
-function conversationTypeOf(channelId: string): ConversationRoster['conversationType'] {
-  return channelId.startsWith('D') ? 'direct' : 'group';
-}
 
 function apiErrorCode(err: unknown): string | undefined {
   const data = (err as { data?: { error?: unknown } } | undefined)?.data;
@@ -84,15 +112,23 @@ function failureDetail(channelId: string, code: string | undefined): string {
  *  - `unknown`: Slack refused (missing scope, bot not in the channel, ...), with
  *    the reason in `statusDetail`.
  *
- * The member list holds ids only, so `isBot` is stated for the bot itself
- * (`self`) and left open for everyone else: another app in the channel is
- * counted as a participant, the safe direction for an audience check.
+ * The member list holds ids only; `isBot` comes from `users.info` (cached):
+ * this app, Slackbot and every other app or bot user (Jira, Giphy, another
+ * agent's app) are marked, so a facilitator never expects their vote. At
+ * most {@link ROSTER_PROFILE_LOOKUPS_MAX} members are looked up per read; a
+ * member beyond that, or whose lookup failed, stays a person.
+ * A read is cached for {@link ROSTER_CACHE_TTL_MS}; `fresh: true` always asks
+ * Slack, and a member joining or leaving drops the cached read
+ * ({@link SlackRosterProvider.forget}). A failed read is never cached and never
+ * `complete`: a failure on any page is `unknown`.
  * One provider per app: the plugin picks the app `asChannelKey` names before
  * it gets here (`SlackAppFleet.rosterProvider`).
  */
-export function createSlackRosterProvider(deps: SlackRosterDeps): ConversationRosterProvider {
+export function createSlackRosterProvider(deps: SlackRosterDeps): SlackRosterProvider {
   const now = deps.now ?? Date.now;
   const cache = new Map<string, { roster: ConversationRoster; at: number }>();
+  /** Bumped by every forget(): a read that started before it is not cached (it may predate the change). */
+  let generation = 0;
 
   const remember = (channelId: string, roster: ConversationRoster): void => {
     cache.delete(channelId);
@@ -105,6 +141,10 @@ export function createSlackRosterProvider(deps: SlackRosterDeps): ConversationRo
 
   return {
     channelType: SLACK_CHANNEL_TYPE,
+    forget(conversationId: string): void {
+      generation += 1;
+      cache.delete(conversationId.trim());
+    },
     async getRoster(conversationId: string, opts?: ConversationRosterRequest) {
       const channelId = conversationId.trim();
       if (!channelId) return undefined;
@@ -112,12 +152,14 @@ export function createSlackRosterProvider(deps: SlackRosterDeps): ConversationRo
       if (!opts?.fresh && hit && now() - hit.at < ROSTER_CACHE_TTL_MS) return hit.roster;
 
       const readAt = new Date(now()).toISOString();
+      const startedAt = generation;
       try {
         const { memberIds, truncated } = await deps.channel.conversationMembers(channelId, ROSTER_MAX_MEMBERS);
         const selfId = deps.channel.selfUserId;
+        const bots = await botIdsOf(deps.channel, memberIds);
         const participants: ConversationParticipant[] = memberIds.map((id) => ({
           userRef: { kind: SLACK_USER_KIND, id },
-          ...(id === selfId ? { isBot: true } : {}),
+          ...(bots.has(id) ? { isBot: true } : {}),
         }));
         const roster: ConversationRoster = {
           conversationType: conversationTypeOf(channelId),
@@ -128,7 +170,7 @@ export function createSlackRosterProvider(deps: SlackRosterDeps): ConversationRo
           readAt,
           ...(truncated ? { statusDetail: `only the first ${String(ROSTER_MAX_MEMBERS)} members were read` } : {}),
         };
-        remember(channelId, roster);
+        if (startedAt === generation) remember(channelId, roster);
         return roster;
       } catch (err) {
         const detail = failureDetail(channelId, apiErrorCode(err));
