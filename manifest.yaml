@@ -288,6 +288,9 @@ optional_requires:
   # (triggers, routines) and deliveries go out through the app they were set
   # on. Absent = agents set no triggers here.
   - "routinesIntegration@1"
+  # Kernel-side: the turn context the plugin installs each channel turn's
+  # participants into (audience floor, member memory). Absent = no roster.
+  - "turnContext@1"
 provides: []
 
 # Generic admin-UI iframe surface (rendered by web-ui for any plugin that

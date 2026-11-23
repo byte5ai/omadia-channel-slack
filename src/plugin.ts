@@ -26,6 +26,7 @@ import { SlackChannel, slackBotChannelKey } from './slackChannel.js';
 import { createSlackPeopleDirectoryProvider } from './slackPeopleDirectory.js';
 import { createSlackMeetingSource, createSlackReadinessProvider } from './slackReadiness.js';
 import { createSlackRosterProvider, type SlackRosterProvider } from './slackRoster.js';
+import { createTurnParticipants, type TurnContextLike } from './turnParticipants.js';
 import { createSlackSendProviders } from './slackSendProviders.js';
 import { SocketModeTransport } from './socketModeTransport.js';
 import { createChannelState, patchState } from './state.js';
@@ -79,6 +80,10 @@ export async function activate(ctx: PluginContext, core: CoreApi): Promise<Chann
   // with a database. Absent = agents cannot set triggers or routines here.
   const routines = ctx.services.get<RoutinesIntegration>(ROUTINES_INTEGRATION_SERVICE);
 
+  // Who is in a channel, handed to the kernel per turn (audience floor, member
+  // memory). Published by the kernel; absent = turns run without a roster.
+  const turnContext = ctx.services.get<TurnContextLike>('turnContext');
+
   const state = createChannelState();
   state.mode = mode;
   const log = (level: LogLevel, message: string, context?: Record<string, unknown>) =>
@@ -102,6 +107,8 @@ export async function activate(ctx: PluginContext, core: CoreApi): Promise<Chann
       outbox,
       log,
       ...(agentBot ? { ownBotKey: () => channel.channelKey() } : {}),
+      // The roster as this app sees it (an agent's app reads its own channels).
+      ...(turnContext ? { withParticipants: createTurnParticipants(roster, turnContext) } : {}),
       // A trigger or routine the agent sets here delivers through this app.
       ...(routines
         ? { routineTurn: createSlackRoutineTurn(routines, channelId, () => (agentBot ? channel.channelKey() : undefined)) }
