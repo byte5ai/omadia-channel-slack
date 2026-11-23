@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.6.1
+
+- **A channel turn tells the kernel who is present**: around every channel and
+  group turn the plugin installs the conversation's participants through the
+  kernel's `turnContext.runWithChatParticipants` (as Teams and Telegram do),
+  read through the app the turn arrived on, people only. Before, the kernel saw
+  no participants for any Slack group turn, so its audience floor refused every
+  tool there ("audience unknown (no_provider)"): a facilitator could not start a
+  vote in a channel (slack#6 live run, 2026-11-23). A roster that is not
+  complete is no audience: the provider fails and the kernel closes the floor.
+  DMs are unchanged (their audience is the sender). Optional requirement
+  `turnContext@1`; on a kernel without it turns run as before.
+
 ## 0.6.0
 
 Native facilitators in Slack (issue #6, spec 2043 §5.3, §5.5, §6.4).
