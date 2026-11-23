@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.7.1
+
+Findings of the live E2E for #6 (2026-11-23), forward-ported from the 0.6.x
+line (0.6.1, 0.6.2) that runs on hosts with plugin-api below 1.87.
+
+- **A channel turn tells the kernel who is present**: the plugin installs the
+  conversation's participants around every channel and group turn
+  (`turnContext.runWithChatParticipants`, as Teams and Telegram do), read
+  through the app the turn arrived on, people only. Before, the kernel's
+  audience floor refused every tool in a Slack channel ("audience unknown
+  (no_provider)"), so a facilitator could not start. A roster that is not
+  complete fails closed. Optional requirement `turnContext@1`.
+- **Names**: roster members, the sender of a turn and the author of a recorded
+  message carry the Slack display name. Before, a facilitator listed nobody
+  and said the member list could not be read.
+
 ## 0.7.0
 
 User-visible texts no longer say "Orchestrator" (spec 2042 §6 criterion 12, `docs/terminology.md`): the manifest description, the package description, the README and the admin page now speak of your agents and the agent runtime.
