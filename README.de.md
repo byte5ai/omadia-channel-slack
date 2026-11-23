@@ -4,7 +4,7 @@
 
 ### Sprich mit deinen omadia-Agenten aus Slack.
 
-Ein signiertes omadia-Plugin, das Slack mit deinem Agenten-Team verbindet. Es leitet DMs und @-Erwähnungen in den Orchestrator und postet die Antwort in derselben Unterhaltung zurück.
+Ein signiertes omadia-Plugin, das Slack mit deinem Agenten-Team verbindet. Es leitet DMs und @-Erwähnungen an deine Agenten und postet die Antwort in derselben Unterhaltung zurück.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-black.svg)](LICENSE)
 [![Built for omadia](https://img.shields.io/badge/built%20for-omadia-2496ED.svg)](https://github.com/byte5ai/omadia)
@@ -22,7 +22,7 @@ omadia ist ein selbst-hostbares agentisches OS: stelle Multi-Agent-Teams aus sig
 
 ## Was es kann
 
-Verbindet Slack mit omadia. DMs und @-Erwähnungen werden in den omadia-Orchestrator geleitet, und die Antwort kommt in derselben Unterhaltung zurück.
+Verbindet Slack mit omadia. DMs und @-Erwähnungen werden an deine Agenten geleitet, und die Antwort kommt in derselben Unterhaltung zurück.
 
 Es gibt zwei Transports:
 
@@ -31,13 +31,13 @@ Es gibt zwei Transports:
 
 ## So funktioniert es in omadia
 
-Ein Channel-Plugin (`kind: channel`). Der omadia-Kernel aktiviert es aus der `manifest.yaml`, dann empfängt es Slack-Events über den Webhook oder den Socket, leitet jede Nachricht an den Orchestrator-Chat-Agenten weiter und postet die Antwort nach Slack zurück. Du brauchst zuerst einen dem Orchestrator zugewiesenen LLM-Provider, sonst gibt es nichts, womit geantwortet werden kann.
+Ein Channel-Plugin (`kind: channel`). Der omadia-Kernel aktiviert es aus der `manifest.yaml`, dann empfängt es Slack-Events über den Webhook oder den Socket, leitet jede Nachricht an die Agent-Runtime weiter und postet die Antwort nach Slack zurück. Du brauchst zuerst einen der Agent-Runtime zugewiesenes Modell, sonst gibt es nichts, womit geantwortet werden kann.
 
 ## Installation
 
 1. Installiere über den [Plugin-Hub](https://hub.omadia.ai) in der omadia-Admin-UI (Store, Upload), oder lade das gebaute ZIP direkt hoch.
 2. Trage die Setup-Felder unten ein. Für dieses Plugin gibt es keinen API-Key.
-3. Weise dem Orchestrator zuerst einen LLM-Provider zu, damit der Chat-Agent ein Modell hat, auf dem er läuft.
+3. Weise der Agent-Runtime zuerst ein Modell zu, damit der Chat-Agent ein Modell hat, auf dem er läuft.
 
 ## Agenten in Slack
 

@@ -384,3 +384,63 @@ test('a DM reply in a thread names the message it answers (replyToMessageId, cha
   const group = await originOf({ channel: 'C1', channel_type: 'channel', ts: '100.1', thread_ts: '90.5' });
   assert.equal(group?.['replyToMessageId'], undefined, 'private turns only');
 });
+
+test('a failing slow turn ends in a system notice after the acknowledgement, never in silence (criterion 10)', async () => {
+  const { clock, advance } = manualClock();
+  const outbox = new SpyOutbox();
+  let fail: () => void = () => undefined;
+  const slow = { chat: () => new Promise((_resolve, reject) => { fail = () => reject(new Error('model down')); }) } as unknown as ChatAgent;
+  const logs: string[] = [];
+  const done = handleSlackTurn(deps({ outbox, route: boundTo(slow), clock, log: (_l, m) => logs.push(m) }), turnFor());
+  await advance(8_001);
+  fail();
+  await done;
+  assert.deepEqual(outbox.sink.calls.map((c) => c.text), [paceAckText('de'), 'Dabei ist ein Fehler aufgetreten. Bitte versuche es erneut.']);
+  assert.equal(outbox.answers[0]?.speaker?.kind, 'agent', 'the acknowledgement is the agent');
+  assert.equal(outbox.answers[1]?.speaker?.kind, 'system', 'the failure is a system notice, not the agent');
+  assert.equal(outbox.answers[1]?.systemNotice?.code, 'agent_error');
+  assert.ok(logs.some((m) => m.includes('failed to handle Slack turn')), 'the failure is logged for the operator');
+});
+
+test('a failing slash command answers with the notice through its response_url', async () => {
+  const outbox = new SpyOutbox();
+  const boom = { chat: async () => { throw new Error('model down'); } } as unknown as ChatAgent;
+  await handleSlackTurn(deps({ outbox, route: boundTo(boom) }), turnFor(commandEvent, commandSource));
+  assert.deepEqual(outbox.sink.calls, [
+    { kind: 'command', target: RESPONSE_URL, text: 'Dabei ist ein Fehler aufgetreten. Bitte versuche es erneut.' },
+  ]);
+});
+
+test('a typed "2" to a numbered question reaches the agent as the option it names (criterion 30)', async () => {
+  const outbox = new SpyOutbox();
+  const seen: ChatInput[] = [];
+  const question = {
+    text: 'Welche Variante?',
+    speaker: MIRA,
+    interactive: { kind: 'choice', question: 'Welche?', options: [{ label: 'A', value: 'variante-a' }, { label: 'B', value: 'variante-b' }] },
+  } as SemanticAnswer;
+  await handleSlackTurn(deps({ outbox, route: boundTo(agentReturning(question, seen)) }), turnFor({ ts: '1.1', text: 'hilf mir', channel_type: 'im' }));
+  assert.match(outbox.sink.calls[0]?.text ?? '', /1\) A\n2\) B/);
+  await handleSlackTurn(deps({ outbox, route: boundTo(agentReturning(answer('Gut.'), seen)) }), turnFor({ ts: '1.2', text: '2', channel_type: 'im' }));
+  assert.equal(seen[0]?.userMessage, 'hilf mir');
+  assert.equal(seen[1]?.userMessage, 'variante-b', 'the value of the second option, not the digit');
+  // the question is spent: the next "2" is just a "2"
+  await handleSlackTurn(deps({ outbox, route: boundTo(agentReturning(answer('Noch eins.'), seen)) }), turnFor({ ts: '1.3', text: '2', channel_type: 'im' }));
+  assert.equal(seen[2]?.userMessage, '2');
+});
+
+test('a topic and a slot question are picked by number too (criterion 30)', async () => {
+  const outbox = new SpyOutbox();
+  const seen: ChatInput[] = [];
+  const topic = { text: 'Welche Firma?', speaker: MIRA, interactive: { kind: 'topic', question: 'Firma?', topics: [{ label: 'ACME GmbH', value: 'acme' }, { label: 'ACME AG', value: 'acme-ag' }] } } as SemanticAnswer;
+  const slots = {
+    text: 'Wann?',
+    speaker: MIRA,
+    interactive: { kind: 'slots', question: 'Termin?', slots: [{ slotId: 's1', start: '2026-12-01T09:00:00Z', end: '2026-12-01T09:30:00Z', timeZone: 'Europe/Berlin', label: 'Di 10:00', confidence: 0.9 }] },
+  } as SemanticAnswer;
+  await handleSlackTurn(deps({ outbox, route: boundTo(agentReturning(topic, seen)) }), turnFor({ ts: '2.1', text: 'frage', channel_type: 'im' }));
+  await handleSlackTurn(deps({ outbox, route: boundTo(agentReturning(slots, seen)) }), turnFor({ ts: '2.2', text: '1', channel_type: 'im' }));
+  assert.equal(seen[1]?.userMessage, 'acme');
+  await handleSlackTurn(deps({ outbox, route: boundTo(agentReturning(answer('Gebucht.'), seen)) }), turnFor({ ts: '2.3', text: '1', channel_type: 'im' }));
+  assert.match(seen[2]?.userMessage ?? '', /slotId="s1"/);
+});

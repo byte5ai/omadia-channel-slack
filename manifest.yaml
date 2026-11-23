@@ -21,8 +21,8 @@ identity:
   kind: "channel"
   domain: "slack"
   name: "Slack"
-  version: "0.6.0"                         # === package.json "version"
-  description: "Slack-Channel via Events API (Webhook, prod-empfohlen) oder Socket Mode (Fallback ohne Public-Host). Routet Slack-DMs und @Mentions in den Omadia-Orchestrator."
+  version: "0.7.0"                         # === package.json "version"
+  description: "Slack-Channel via Events API (Webhook, prod-empfohlen) oder Socket Mode (Fallback ohne Public-Host). Routet Slack-DMs und @Mentions an deine Agenten."
   authors:
     - name: "byte5 GmbH"
       email: "info@omadia.ai"
