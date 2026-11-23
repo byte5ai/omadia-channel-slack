@@ -71,7 +71,7 @@ export async function activate(ctx: PluginContext, core: CoreApi): Promise<Chann
   const agent = resolveChatAgent(ctx);
   if (!agent) {
     throw new Error(
-      '@omadia/channel-slack: orchestrator unavailable (getChatAgent) — the orchestrator plugin must be installed and active',
+      '@omadia/channel-slack: agent runtime unavailable (getChatAgent) — the agent runtime must be installed and active',
     );
   }
 

@@ -21,8 +21,8 @@ identity:
   kind: "channel"
   domain: "slack"
   name: "Slack"
-  version: "0.6.0"                         # === package.json "version"
-  description: "Slack-Channel via Events API (Webhook, prod-empfohlen) oder Socket Mode (Fallback ohne Public-Host). Routet Slack-DMs und @Mentions in den Omadia-Orchestrator."
+  version: "0.7.0"                         # === package.json "version"
+  description: "Slack-Channel via Events API (Webhook, prod-empfohlen) oder Socket Mode (Fallback ohne Public-Host). Routet Slack-DMs und @Mentions an deine Agenten."
   authors:
     - name: "byte5 GmbH"
       email: "info@omadia.ai"
@@ -39,7 +39,9 @@ compat:
   # proactive send's speaker and disposer, RoutineTurnInput.conductorBinding.
   # 0.5.0 raises it to 1.82.0: the conversation provider implements `react`
   # (plugin-api 1.82.0, channel-sdk 0.3.9; byte5ai/omadia#2151).
-  core: ">=1.82.0 <2.0"
+  # 0.7.0 raises it to 1.87.0: typed replies to answer elements use the
+  # channel-sdk 0.3.13 PendingInteractiveStore (round G4, criterion 30).
+  core: ">=1.87.0 <2.0"
   node: ">=20"
 
 depends_on: []

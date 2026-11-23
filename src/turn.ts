@@ -266,9 +266,11 @@ export async function handleSlackTurn(deps: TurnDeps, turn: IncomingTurn): Promi
       return;
     }
     const speaker = resolution.kind === 'agent' ? resolution.speaker : undefined;
+    // A typed "2" to a numbered question is the option it names (criterion 30).
+    const typedReply = deps.outbox.resolveTypedReply(meta.sessionScope, turn.text);
     const chat = () =>
       agent.chat({
-        userMessage: turn.text,
+        userMessage: typedReply,
         sessionScope: meta.sessionScope,
         userId: turn.userRef.id,
         origin,

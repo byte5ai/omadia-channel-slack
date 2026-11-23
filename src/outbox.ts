@@ -1,6 +1,9 @@
 import {
+  InMemoryPendingInteractiveStore,
   InMemorySpeakerHistoryStore,
+  resolveTypedInteractiveReply,
   type AgentSpeaker,
+  type PendingInteractiveStore,
   type SemanticAnswer,
   type Speaker,
   type SpeakerHistoryStore,
@@ -68,7 +71,19 @@ export class SlackOutbox {
     private readonly sink: SlackSink,
     private readonly speakerHistory: SpeakerHistoryStore = new InMemorySpeakerHistoryStore(),
     private readonly nativeIdentity = false,
+    /** The question the last answer showed as numbered text, per conversation (criterion 30). */
+    private readonly pendingInteractives: PendingInteractiveStore = new InMemoryPendingInteractiveStore(),
   ) {}
+
+  /**
+   * The message the agent should receive for a person's text: the value of the
+   * option they picked when it answers the choice/topic/slots question the
+   * last answer of this conversation showed as numbered text; else the text
+   * unchanged (spec 2042 §6 criterion 30).
+   */
+  resolveTypedReply(conversationKey: string, text: string): string {
+    return resolveTypedInteractiveReply(this.pendingInteractives, conversationKey, text).text;
+  }
 
   /** Render and send one answer. Returns false when there was nothing to say. */
   async deliver(answer: SemanticAnswer, target: DeliveryTarget): Promise<boolean> {
@@ -84,6 +99,7 @@ export class SlackOutbox {
       nativeIdentity: this.nativeIdentity,
       conversationKey: target.conversationKey,
       speakerHistory: this.speakerHistory,
+      pendingInteractives: this.pendingInteractives,
     });
     if (text.length === 0) return { sent: false };
     let messageId: string | undefined;
