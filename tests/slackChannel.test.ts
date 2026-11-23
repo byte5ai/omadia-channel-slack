@@ -373,3 +373,13 @@ test('granted scopes are re-read through auth.test once stale; a failed refresh 
   assert.deepEqual(await channel.refreshScopes(), ['chat:write', 'channels:history']);
   assert.equal(calls, 3);
 });
+
+test('a recorded message names its author with the Slack display name (slack#6)', async () => {
+  const events: ConversationMessageEvent[] = [];
+  const { channel } = make({}, async () => ({ user: { profile: { display_name: 'Marcel Wege' } } }), {
+    emitMessage: (e) => void events.push(e),
+    deliveryOf: () => 'all',
+  });
+  await channel.ingest({ type: 'message', channel: 'C1', user: 'U1', text: '1,3,2', ts: '7.7', channel_type: 'channel' }, 'T1');
+  assert.equal(events[0]?.author.displayName, 'Marcel Wege');
+});
