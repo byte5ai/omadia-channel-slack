@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.6.2
+
+- **Members and senders carry their Slack name**: the roster listed member ids
+  only, so a facilitator showed every member as a placeholder and its
+  handshake claimed the member list could not be read (slack#6 live run,
+  2026-11-23). The display name from the `users.info` lookup the roster
+  already makes (for `isBot`) now goes on each member's `userRef`, and the
+  sender of a turn carries it too, so "started by" names the person.
+
 ## 0.6.1
 
 - **A channel turn tells the kernel who is present**: around every channel and

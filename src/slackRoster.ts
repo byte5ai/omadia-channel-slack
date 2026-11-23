@@ -14,7 +14,7 @@ export interface SlackMembersSource {
   readonly selfUserId: string;
   conversationMembers(channel: string, max: number): Promise<{ memberIds: string[]; truncated: boolean }>;
   /** `users.info`, cached; never throws (an unknown member is `{}`). */
-  senderProfile?(userId: string): Promise<{ isBot?: boolean }>;
+  senderProfile?(userId: string): Promise<{ isBot?: boolean; displayName?: string }>;
 }
 
 export interface SlackRosterDeps {
@@ -41,23 +41,32 @@ export const ROSTER_PROFILE_LOOKUPS_MAX = 300;
 /** Parallel `users.info` lookups per read (the cache answers repeats). */
 const ROSTER_PROFILE_CONCURRENCY = 8;
 
-/** Which members are apps or bots: own app, Slackbot, and `users.info` is_bot. */
-async function botIdsOf(source: SlackMembersSource, memberIds: readonly string[]): Promise<Set<string>> {
+/** What `users.info` says about the members: which are apps or bots, and their display names. */
+interface MemberProfiles {
+  readonly bots: Set<string>;
+  readonly names: Map<string, string>;
+}
+
+/** Own app, Slackbot and `users.info` is_bot are bots; a name comes from the same (cached) lookup. */
+async function profilesOf(source: SlackMembersSource, memberIds: readonly string[]): Promise<MemberProfiles> {
   const bots = new Set<string>(memberIds.filter((id) => id === source.selfUserId || id === SLACKBOT_USER_ID));
+  const names = new Map<string, string>();
   const lookup = source.senderProfile?.bind(source);
-  if (!lookup) return bots;
+  if (!lookup) return { bots, names };
   const queue = memberIds.filter((id) => !bots.has(id)).slice(0, ROSTER_PROFILE_LOOKUPS_MAX);
   const worker = async (): Promise<void> => {
     for (let id = queue.shift(); id !== undefined; id = queue.shift()) {
       try {
-        if ((await lookup(id)).isBot === true) bots.add(id);
+        const profile = await lookup(id);
+        if (profile.isBot === true) bots.add(id);
+        if (profile.displayName) names.set(id, profile.displayName);
       } catch {
-        // A failed lookup leaves the member a person (the safe direction for an audience check).
+        // A failed lookup leaves the member a person (the safe direction for an audience check), unnamed.
       }
     }
   };
   await Promise.all(Array.from({ length: Math.min(ROSTER_PROFILE_CONCURRENCY, queue.length) }, worker));
-  return bots;
+  return { bots, names };
 }
 
 const SLACK_USER_KIND = 'slack-user' as const;
@@ -156,11 +165,14 @@ export function createSlackRosterProvider(deps: SlackRosterDeps): SlackRosterPro
       try {
         const { memberIds, truncated } = await deps.channel.conversationMembers(channelId, ROSTER_MAX_MEMBERS);
         const selfId = deps.channel.selfUserId;
-        const bots = await botIdsOf(deps.channel, memberIds);
-        const participants: ConversationParticipant[] = memberIds.map((id) => ({
-          userRef: { kind: SLACK_USER_KIND, id },
-          ...(bots.has(id) ? { isBot: true } : {}),
-        }));
+        const { bots, names } = await profilesOf(deps.channel, memberIds);
+        const participants: ConversationParticipant[] = memberIds.map((id) => {
+          const displayName = names.get(id);
+          return {
+            userRef: { kind: SLACK_USER_KIND, id, ...(displayName ? { displayName } : {}) },
+            ...(bots.has(id) ? { isBot: true } : {}),
+          };
+        });
         const roster: ConversationRoster = {
           conversationType: conversationTypeOf(channelId),
           participants,

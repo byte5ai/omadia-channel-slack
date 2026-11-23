@@ -178,3 +178,23 @@ test('profile lookups per read are capped', async () => {
   assert.equal(lookups, ROSTER_PROFILE_LOOKUPS_MAX);
   assert.equal(roster?.participants.filter((p) => p.isBot === true).length, ROSTER_PROFILE_LOOKUPS_MAX);
 });
+
+test('members carry their Slack display name, so a facilitator can list them (slack#6)', async () => {
+  const names: Record<string, { isBot?: boolean; displayName?: string }> = {
+    U1: { displayName: 'Marcel Wege' },
+    U2: {},
+    UAPP: { isBot: true, displayName: 'Jira' },
+  };
+  const provider = createSlackRosterProvider({
+    channel: {
+      ...source(async () => ({ memberIds: ['U1', 'U2', 'UAPP', 'UBOT'], truncated: false })),
+      senderProfile: async (id: string) => names[id] ?? {},
+    },
+    log: () => undefined,
+  });
+  const roster = await provider.getRoster('C1');
+  const byId = new Map(roster?.participants.map((p) => [p.userRef.id, p]));
+  assert.equal(byId.get('U1')?.userRef.displayName, 'Marcel Wege');
+  assert.equal(byId.get('U2')?.userRef.displayName, undefined);
+  assert.equal(byId.get('UAPP')?.isBot, true);
+});

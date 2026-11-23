@@ -85,6 +85,8 @@ export interface SlackSenderProfile {
   readonly email?: string;
   /** `de` or `en`; any other language is left out (the kernel then writes German). */
   readonly locale?: string;
+  /** Display name, else real name, else handle (`users.info`). */
+  readonly displayName?: string;
 }
 
 /** `de-DE` / `en_US` → `de` / `en`; anything else → `undefined`. */
@@ -153,6 +155,7 @@ export function buildIncomingTurn(
       kind: 'slack-user',
       id: event.user ?? event.channel,
       ...(profile.email ? { email: profile.email } : {}),
+      ...(profile.displayName ? { displayName: profile.displayName } : {}),
     },
     text,
     metadata: meta as unknown as Record<string, unknown>,
