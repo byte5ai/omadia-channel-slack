@@ -1,3 +1,4 @@
+import type { WithParticipants } from './turnParticipants.js';
 import {
   DEFAULT_PACE_PROFILE,
   channelUserPrincipal,
@@ -187,6 +188,12 @@ export interface TurnDeps {
    * (through this app). Absent = the kernel publishes no routines.
    */
   readonly routineTurn?: SlackRoutineTurn;
+  /**
+   * Runs a channel or group turn with the conversation's participants known to
+   * the kernel (audience floor, member memory). Absent = the kernel publishes
+   * no turn context; a DM never needs it (its audience is the sender).
+   */
+  readonly withParticipants?: WithParticipants;
 }
 
 /**
@@ -266,13 +273,16 @@ export async function handleSlackTurn(deps: TurnDeps, turn: IncomingTurn): Promi
       return;
     }
     const speaker = resolution.kind === 'agent' ? resolution.speaker : undefined;
-    const chat = () =>
+    const ask = () =>
       agent.chat({
         userMessage: turn.text,
         sessionScope: meta.sessionScope,
         userId: turn.userRef.id,
         origin,
       });
+    // A channel or group turn tells the kernel who is present, through the app it arrived on.
+    const withParticipants = meta.channelType !== 'im' ? deps.withParticipants : undefined;
+    const chat = withParticipants ? () => withParticipants(turn.conversationId, ask) : ask;
     // The routines scope wraps the whole turn: who asks, and where a trigger
     // or routine the agent sets now delivers later.
     const scoped = deps.routineTurn?.({
