@@ -492,7 +492,12 @@ export class SlackChannel implements SlackSink, SlackReactor, SlackEventTarget {
         messageId: event.ts,
         revision: 0,
         kind: 'created',
-        author: { kind: 'slack-user', id: event.user, ...(profile.email ? { email: profile.email } : {}) },
+        author: {
+          kind: 'slack-user',
+          id: event.user,
+          ...(profile.email ? { email: profile.email } : {}),
+          ...(profile.displayName ? { displayName: profile.displayName } : {}),
+        },
         ...(teamId ? { tenantId: teamId } : {}),
         ...(text ? { text } : {}),
         ...(event.thread_ts && event.thread_ts !== event.ts ? { replyToMessageId: event.thread_ts } : {}),
