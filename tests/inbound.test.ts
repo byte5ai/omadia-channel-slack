@@ -63,3 +63,10 @@ test('only de and en are carried as the sender language', () => {
   assert.equal(supportedLocale('fr-FR'), undefined);
   assert.equal(supportedLocale(undefined), undefined);
 });
+
+test('the sender carries the Slack display name, so a facilitator names who started it (slack#6)', () => {
+  const ev = { type: 'message' as const, channel: 'C1', user: 'U1', ts: '5.5', channel_type: 'channel' };
+  const named = buildIncomingTurn('s', ev, 'x', undefined, {}, { displayName: 'Marcel Wege' });
+  assert.equal(named.userRef.displayName, 'Marcel Wege');
+  assert.equal(buildIncomingTurn('s', ev, 'x', undefined, {}, {}).userRef.displayName, undefined);
+});
