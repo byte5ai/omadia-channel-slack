@@ -51,7 +51,7 @@ export function createTurnParticipants(roster: ConversationRosterProvider, turnC
         .map((p) => ({
           channelUserId: p.userRef.id,
           aadObjectId: null,
-          displayName: p.userRef.id,
+          displayName: p.userRef.displayName ?? p.userRef.id,
           email: null,
           userPrincipalName: null,
         }));
